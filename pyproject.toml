@@ -1,0 +1,40 @@
+[project]
+name = "worldquant-alpha"
+version = "0.1.0"
+description = "基于本地Ollama大语言模型的智能Alpha因子生成系统"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "openai>=1.12.0",
+    "typing-extensions>=4.9.0",
+    "pandas",
+    "scikit-learn",
+    "numpy>=1.24.0",
+    "schedule>=1.2.0",
+    "flask>=2.3.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "torchaudio>=2.0.0",
+]
+
+[dependency-groups]
+dev = []
+
+[project.scripts]
+alpha-orchestrator = "core.alpha_orchestrator:main"
+alpha-generator = "core.alpha_generator_ollama:main"
+alpha-submitter = "core.improved_alpha_submitter:main"
+alpha-miner = "miners.alpha_expression_miner:main"
+alpha-miner-continuous = "miners.alpha_expression_miner_continuous:main"
+template-miner = "miners.template_grid_miner:main"
+machine-miner = "miners.machine_miner:main"
+vram-monitor = "infrastructure.vram_monitor:main"
+fleet-manager = "infrastructure.model_fleet_manager:main"
+health-check = "infrastructure.health_check:main"
+dashboard = "web.dashboard:main"
