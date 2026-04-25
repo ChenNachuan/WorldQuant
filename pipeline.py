@@ -282,6 +282,8 @@ class AlphaMiningPipeline:
 
                     success = fitness is not None and fitness >= 1.0
 
+                    save_alpha(expr, alpha_data, source="pipeline")
+
                     self.self_optimizer.record_result(
                         expression=expr, fitness=fitness, sharpe=sharpe,
                         turnover=turnover, success=success,
@@ -293,7 +295,6 @@ class AlphaMiningPipeline:
 
                     if success:
                         self.successful_alphas.append((expr, fitness or 0))
-                        save_alpha(expr, alpha_data, source="pipeline")
                         alpha_id = alpha_data.get("id")
                         if alpha_id:
                             self._mark_green(alpha_id)

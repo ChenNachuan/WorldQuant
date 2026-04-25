@@ -255,7 +255,7 @@ class AlphaGenerator:
             sampled_fields = random.sample(data_fields, min(30, len(data_fields)))
             field_ids_for_prompt = [field['id'] for field in sampled_fields]
 
-            prompt = f"""Generate 5 unique, realistic FASTEXPR alpha expressions using only the provided operators and data fields. Return ONLY the expressions, one per line, with no comments or explanations.
+            prompt = f"""Generate 5 DIVERSE and CREATIVE FASTEXPR alpha expressions. Each expression should use a DIFFERENT structure/pattern. Return ONLY the expressions, one per line, with no comments or explanations.
 
 Available Data Fields:
 {field_ids_for_prompt}
@@ -282,31 +282,33 @@ Transformational:
 Group:
 {chr(10).join(format_operators(sampled_operators.get('Group', [])))}
 
-Quality checklist (hard constraints):
-1. 仅输出单行 FASTEXPR 表达式：禁止赋值/变量名/多语句/分号/注释。
-2. 必须使用以下白名单算子：ts_mean/ts_std_dev/ts_rank/rank/zscore/divide/add/subtract/multiply/group_neutralize/group_mean/group_zscore/ts_product。
-3. 强制平滑与中性：优先形如 group_neutralize(zscore(<ts_op>), sector)。
-4. 时间窗限制：仅可使用 {5, 20, 60, 120, 180, 252}。
-5. 避免逻辑/条件类算子（if_else/trade_when/bucket/equal/greater/less/normalize），避免过深嵌套（最多3层）。
-6. 严禁自造变量名（如 market_ret/rfr），仅使用提供的数据字段与白名单算子。
+Rules:
+1. Output ONLY single-line FASTEXPR expressions. No variables, no comments, no semicolons.
+2. Use ONLY the provided data fields and operators above.
+3. Time windows: only use {{5, 20, 60, 120, 180, 252}}.
+4. Max nesting depth: 4 levels.
+5. group_neutralize second arg must be one of: sector, industry, subindustry, market (no quotes).
+6. Do NOT use categorical fields (sector, industry, etc.) as numeric inputs to ts_ operators.
+7. All data fields must be numeric. Do NOT invent variable names.
 
-CRITICAL data type rules:
-- 禁止对分类/字符串字段（naicss, sector, industry, sic, exchange, country, currency, region）使用 ts_mean/ts_std_dev/ts_rank/ts_sum/ts_product 等时间序列算子。这些字段只能作为 group_neutralize 的第二个参数。
-- group_neutralize 的第二个参数必须是以下标识符之一（不要加引号）: sector, industry, subindustry, market。例如 group_neutralize(expr, sector) 而不是 group_neutralize(expr, "sector")。
-- ts_product 仅接受两个数值参数，不接受 lookback 窗口参数。
-- divide/multiply/add/subtract 的两个参数都必须是数值表达式。
-- 所有数据字段必须是数值型，禁止使用分类字段作为算子输入。
+DIVERSITY REQUIREMENTS - use a DIFFERENT pattern for each expression:
+- Pattern A: group_neutralize(zscore(ts_xxx(field, window)), sector)
+- Pattern B: rank(ts_corr(field1, field2, window))
+- Pattern C: group_mean(divide(ts_delta(field, window), ts_std_dev(field, window)), industry)
+- Pattern D: ts_rank(subtract(field, ts_mean(field, window)), window)
+- Pattern E: group_zscore(multiply(rank(field1), rank(field2)), subindustry)
+- Pattern F: zscore(ts_av_diff(field, window))
+- Pattern G: group_neutralize(divide(ts_mean(field1, w1), ts_mean(field2, w2)), market)
+- Pattern H: rank(ts_covariance(field1, field2, window))
 
-Tips: 
-- Pay attention to operator types (SCALAR, VECTOR, MATRIX) for compatibility.
-- Study the operator definitions and descriptions to understand their behavior.
+Pick 5 DIFFERENT patterns from above. Do NOT repeat the same pattern.
 
-Example format:
+Example diverse output:
 group_neutralize(zscore(ts_mean(returns, 120)), sector)
-group_neutralize(zscore(ts_mean(returns, 120) - ts_mean(returns, 252)), sector)
-group_neutralize(zscore(rank(divide(revenue, assets))), industry)
-ts_covariance(divide(revenue, assets), cashflow_op, 180)
-rank(ts_std_dev(returns, 60))
+rank(ts_corr(volume, close, 60))
+group_mean(divide(ts_delta(revenue, 20), ts_std_dev(revenue, 60)), industry)
+ts_rank(subtract(returns, ts_mean(returns, 20)), 120)
+group_zscore(multiply(rank(volume), rank(returns)), subindustry)
 """
 
             # Prepare Ollama API request
@@ -315,9 +317,9 @@ rank(ts_std_dev(returns, 60))
                 'model': model_name,
                 'prompt': prompt,
                 'stream': False,
-                'temperature': 0.2,
-                'top_p': 0.8,
-                'num_predict': 1000  # Use num_predict instead of max_tokens for Ollama
+                'temperature': 0.7,
+                'top_p': 0.9,
+                'num_predict': 1000
             }
 
             print("Sending request to Ollama API...")
