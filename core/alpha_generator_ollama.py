@@ -309,6 +309,7 @@ rank(ts_corr(volume, close, 60))
 group_mean(divide(ts_delta(revenue, 20), ts_std_dev(revenue, 60)), industry)
 ts_rank(subtract(returns, ts_mean(returns, 20)), 120)
 group_zscore(multiply(rank(volume), rank(returns)), subindustry)
+(rank(anl4_capex_flag) - rank(assets/liabilities_curr))*adv20
 """
 
             # Prepare Ollama API request
