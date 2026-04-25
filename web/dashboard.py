@@ -457,4 +457,4 @@ if __name__ == '__main__':
     print("Ollama WebUI: http://localhost:3000")
     print("Ollama API: http://localhost:11434")
     
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)

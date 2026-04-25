@@ -255,7 +255,7 @@ class AlphaGenerator:
             sampled_fields = random.sample(data_fields, min(30, len(data_fields)))
             field_ids_for_prompt = [field['id'] for field in sampled_fields]
 
-            prompt = f"""Generate 5 DIVERSE and CREATIVE FASTEXPR alpha expressions. Each expression should use a DIFFERENT structure/pattern. Return ONLY the expressions, one per line, with no comments or explanations.
+            prompt = f"""You are an elite Quantitative Researcher participating in the WorldQuant IQC. Your task is to generate 5 DIVERSE, HIGH-SHARPE FASTEXPR alpha expressions. Each expression MUST use a DIFFERENT financial logic pattern. Return ONLY the expressions, one per line, with no comments or explanations.
 
 Available Data Fields:
 {field_ids_for_prompt}
@@ -263,59 +263,47 @@ Available Data Fields:
 Available Operators by Category:
 Time Series:
 {chr(10).join(format_operators(sampled_operators.get('Time Series', [])))}
-
 Cross Sectional:
 {chr(10).join(format_operators(sampled_operators.get('Cross Sectional', [])))}
-
 Arithmetic:
 {chr(10).join(format_operators(sampled_operators.get('Arithmetic', [])))}
-
 Logical:
 {chr(10).join(format_operators(sampled_operators.get('Logical', [])))}
-
 Vector:
 {chr(10).join(format_operators(sampled_operators.get('Vector', [])))}
-
 Transformational:
 {chr(10).join(format_operators(sampled_operators.get('Transformational', [])))}
-
 Group:
 {chr(10).join(format_operators(sampled_operators.get('Group', [])))}
 
-Rules:
+CRITICAL RULES (Hard Constraints):
 1. Output ONLY single-line FASTEXPR expressions. No variables, no comments, no semicolons.
-2. Use ONLY the provided data fields and operators above.
+2. Use ONLY the provided data fields and operators. Do NOT invent fields.
 3. Time windows: only use {{5, 20, 60, 120, 180, 252}}.
-4. Max nesting depth: 4 levels.
-5. group_neutralize second arg must be one of: sector, industry, subindustry, market (no quotes).
-6. Do NOT use categorical fields (sector, industry, etc.) as numeric inputs to ts_ operators.
-7. All data fields must be numeric. Do NOT invent variable names.
+4. Max nesting depth: 4 levels. Keep it elegant.
+5. The OUTERMOST layer of EVERY expression MUST be either `rank()`, `group_neutralize()`, or `-rank()`. This is mandatory for cross-sectional stability.
+6. `group_neutralize` second arg must be exactly one of: sector, industry, subindustry, market (no quotes).
+7. Do NOT use categorical fields as inputs to time-series (ts_) operators.
 
-DIVERSITY REQUIREMENTS - use a DIFFERENT pattern for each expression:
-- Pattern A: group_neutralize(zscore(ts_xxx(field, window)), sector)
-- Pattern B: rank(ts_corr(field1, field2, window))
-- Pattern C: group_mean(divide(ts_delta(field, window), ts_std_dev(field, window)), industry)
-- Pattern D: ts_rank(subtract(field, ts_mean(field, window)), window)
-- Pattern E: group_zscore(multiply(rank(field1), rank(field2)), subindustry)
-- Pattern F: zscore(ts_av_diff(field, window))
-- Pattern G: group_neutralize(divide(ts_mean(field1, w1), ts_mean(field2, w2)), market)
-- Pattern H: rank(ts_covariance(field1, field2, window))
+DIVERSITY REQUIREMENTS (Encode these 5 specific Financial Themes):
+Generate exactly 5 expressions, each strictly following one of these themes:
+- Theme 1 (Trend Following): group_neutralize(zscore(ts_av_diff(FIELD, window)), sector) -> Capture the momentum or mean-reversion of a fundamental/model field.
+- Theme 2 (Cross-Sectional Anomaly): rank(ts_corr(FIELD_1, FIELD_2, window)) -> Measure the rolling correlation between a price/volume field and a fundamental field.
+- Theme 3 (Volatility Adjusted): group_neutralize(divide(ts_delta(FIELD, window), ts_std_dev(FIELD, window)), industry) -> Signal scaled by its own historical volatility.
+- Theme 4 (Relative Strength): ts_rank(subtract(FIELD, ts_mean(FIELD, window)), window) -> How strong is the current value relative to its historical mean.
+- Theme 5 (Interaction/Composite): group_zscore(multiply(rank(FIELD_1), rank(FIELD_2)), subindustry) -> Combining two orthogonal fields (e.g., value and momentum).
 
-Pick 5 DIFFERENT patterns from above. Do NOT repeat the same pattern.
-
-Example diverse output:
-group_neutralize(zscore(ts_mean(returns, 120)), sector)
+Example Formats (DO NOT COPY THESE EXACTLY, learn the structure):
+group_neutralize(zscore(ts_av_diff(fnd6_newqv1300_wcapq, 20)), sector)
 rank(ts_corr(volume, close, 60))
-group_mean(divide(ts_delta(revenue, 20), ts_std_dev(revenue, 60)), industry)
-ts_rank(subtract(returns, ts_mean(returns, 20)), 120)
-group_zscore(multiply(rank(volume), rank(returns)), subindustry)
-(rank(anl4_capex_flag) - rank(assets/liabilities_curr))*adv20
+group_neutralize(divide(ts_delta(mdl177_2_earningmomentumfactor400_sue, 20), ts_std_dev(mdl177_2_earningmomentumfactor400_sue, 60)), industry)
+-rank(ts_rank(subtract(returns, ts_mean(returns, 20)), 120))
+group_zscore(multiply(rank(volume), rank(fnd6_newqv1300_spceq)), subindustry)
 """
-
             # Prepare Ollama API request
             model_name = getattr(self, 'model_name', self.model_fleet[self.current_model_index])
             ollama_data = {
-                'model': model_name,
+                'model': model_name,    
                 'prompt': prompt,
                 'stream': False,
                 'temperature': 0.7,
@@ -331,8 +319,8 @@ group_zscore(multiply(rank(volume), rank(returns)), subindustry)
                     timeout=600  # 10 minutes timeout for large models
                 )
 
-                print(f"Ollama API response status: {response.status_code}")
-                print(f"Ollama API response: {response.text[:500]}...")  # Print first 500 chars
+                logger.info(f"Ollama API response status: {response.status_code}")
+                logger.info(f"Ollama API response: {response.text[:500]}...")  # Print first 500 chars
 
                 if response.status_code == 500:
                     logger.error(f"Ollama API returned 500 error: {response.text}")

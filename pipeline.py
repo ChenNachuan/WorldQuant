@@ -280,9 +280,29 @@ class AlphaMiningPipeline:
                     turnover = is_data.get("turnover")
                     returns_val = is_data.get("returns")
 
-                    success = fitness is not None and fitness >= 1.0
+                    success = (
+                        fitness is not None and fitness >= 1.0
+                        and sharpe is not None and sharpe >= 1.25
+                    )
 
                     save_alpha(expr, alpha_data, source="pipeline")
+
+                    # Alpha Flipper: recycle extremely negative-Sharpe alphas
+                    if not success and sharpe is not None and sharpe <= -1.0:
+                        logger.info(f"💡 Alpha Flipper triggered! Sharpe={sharpe:.2f}, flipping sign...")
+                        if expr.startswith("-rank("):
+                            flipped_expr = expr.replace("-rank(", "rank(", 1)
+                        elif expr.startswith("rank("):
+                            flipped_expr = "-1 * " + expr
+                        else:
+                            flipped_expr = f"-1 * ({expr})"
+                        existing_exprs = (
+                            {e for e, _ in self.failed_alphas}
+                            | {e for e, _ in self.successful_alphas}
+                        )
+                        if flipped_expr not in existing_exprs:
+                            self.generator.retry_queue.add(flipped_expr)
+                            logger.info(f"  ↪ Queued flipped: {flipped_expr[:60]}...")
 
                     self.self_optimizer.record_result(
                         expression=expr, fitness=fitness, sharpe=sharpe,
@@ -300,8 +320,8 @@ class AlphaMiningPipeline:
                             self._mark_green(alpha_id)
                         logger.info(f"SUCCESS: {expr[:60]}... fitness={fitness:.4f} sharpe={sharpe}")
                     else:
-                        self.failed_alphas.append((expr, f"fitness={fitness}"))
-                        logger.info(f"Failed: {expr[:60]}... fitness={fitness}")
+                        self.failed_alphas.append((expr, f"fitness={fitness} sharpe={sharpe}"))
+                        logger.info(f"Failed: {expr[:60]}... fitness={fitness} sharpe={sharpe}")
                 else:
                     self.failed_alphas.append((expr, "simulation failed"))
 
@@ -411,6 +431,37 @@ class AlphaMiningPipeline:
             logger.info(f"\nTop failure reasons:")
             for reason, count in top_errors:
                 logger.info(f"  [{count}x] {reason}")
+
+        # Export DPO training dataset
+        self.export_dpo_dataset()
+
+    def export_dpo_dataset(self, filename: str = "dpo_training_data.jsonl"):
+        """Export mining results as DPO fine-tuning pairs (chosen=success, rejected=fail)."""
+        if not self.successful_alphas or not self.failed_alphas:
+            logger.info("Not enough data for DPO export (need both successes and failures)")
+            return
+
+        import os
+        os.makedirs("data", exist_ok=True)
+        filepath = os.path.join("data", filename)
+
+        pairs_written = 0
+        with open(filepath, "a", encoding="utf-8") as f:
+            for i in range(min(len(self.successful_alphas), len(self.failed_alphas))):
+                chosen_expr = self.successful_alphas[i][0]
+                rejected_expr = self.failed_alphas[i][0]
+                dpo_pair = {
+                    "prompt": (
+                        "You are an elite Quantitative Researcher participating in the "
+                        "WorldQuant IQC. Generate a HIGH-SHARPE FASTEXPR alpha expression."
+                    ),
+                    "chosen": chosen_expr,
+                    "rejected": rejected_expr,
+                }
+                f.write(json.dumps(dpo_pair) + "\n")
+                pairs_written += 1
+
+        logger.info(f"✅ DPO dataset updated: {filepath} (+{pairs_written} pairs)")
 
 
 def main():
