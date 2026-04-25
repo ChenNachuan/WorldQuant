@@ -4,7 +4,7 @@ import json
 import os
 from time import sleep
 from requests.auth import HTTPBasicAuth
-from typing import List, Dict
+from typing import List, Dict, Optional
 import time
 import re
 from queue import Queue
@@ -13,6 +13,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 
 from .log_manager import setup_logger
+from .data_fetcher import OperatorFetcher, DataFieldFetcher, SmartSearch
+from .ast_validator import ASTValidator
+from .expression_compiler import ExpressionCompiler
+from .simulation_slot_manager import SimulationSlotManager
+from .region_config import get_region_config, RegionConfig
+from .self_optimizer import SelfOptimizer
+from .quality_monitor import QualityMonitor, AlphaMetrics
+from evolution.similarity import TemplateSimilarity
+
 logger = setup_logger(__name__, "generator")
 
 class RetryQueue:
@@ -52,7 +61,7 @@ class RetryQueue:
             time.sleep(1)  # Prevent busy waiting
 
 class AlphaGenerator:
-    def __init__(self, ollama_url: str = None, max_concurrent: int = 2):
+    def __init__(self, ollama_url: str = None, max_concurrent: int = 2, region_key: str = "USA"):
         from .config import load_credentials, get_ollama_url
         self.sess = requests.Session()
         self._fix_proxy()
@@ -61,12 +70,10 @@ class AlphaGenerator:
         self.results = []
         self.pending_results = {}
         self.retry_queue = RetryQueue(self)
-        # Reduce concurrent workers to prevent VRAM issues
-        self.executor = ThreadPoolExecutor(max_workers=max_concurrent)  # For concurrent simulations
-        self.vram_cleanup_interval = 10  # Cleanup every 10 operations
+        self.executor = ThreadPoolExecutor(max_workers=max_concurrent)
+        self.vram_cleanup_interval = 10
         self.operation_count = 0
         
-        # Model downgrade tracking
         self.initial_model = getattr(self, 'model_name', 'qwen3.5:35b')
         self.error_count = 0
         self.max_errors_before_downgrade = 3
@@ -76,6 +83,42 @@ class AlphaGenerator:
             'deepseek-coder-v2:16b'
         ]
         self.current_model_index = 0
+
+        self.region_config = get_region_config(region_key)
+        self.operator_fetcher = OperatorFetcher(session=self.sess)
+        self.data_field_fetcher = DataFieldFetcher(session=self.sess)
+        self.smart_search = SmartSearch()
+        self.ast_validator = ASTValidator()
+        self.slot_manager = SimulationSlotManager(
+            max_concurrent=self.region_config.max_concurrent
+        )
+        self.self_optimizer = SelfOptimizer()
+        self.quality_monitor = QualityMonitor()
+        self.template_similarity = TemplateSimilarity()
+        self.expression_compiler = ExpressionCompiler()
+        
+        self._cached_operators: List[Dict] = []
+        self._cached_fields: List[Dict] = []
+        self._initialized = False
+
+    def _ensure_initialized(self):
+        if self._initialized:
+            return
+        operators = self.get_operators()
+        fields = self.get_data_fields()
+        if operators or fields:
+            op_names = set(op.get("name", "") for op in operators if op.get("name"))
+            field_ids = set(f.get("id", "") for f in fields if f.get("id"))
+            self.ast_validator = ASTValidator(
+                known_operators=op_names,
+                known_fields=field_ids,
+            )
+            self.expression_compiler = ExpressionCompiler(
+                operators=list(op_names),
+                fields=list(field_ids)[:50],
+            )
+            self._initialized = True
+            logger.info(f"Lazy-init AST validator with {len(op_names)} operators, {len(field_ids)} fields")
     
     def _fix_proxy(self) -> None:
         from .config import fix_session_proxy
@@ -117,106 +160,37 @@ class AlphaGenerator:
             logger.warning(f"VRAM cleanup failed: {e}")
         
     def get_data_fields(self) -> List[Dict]:
-        """Fetch available data fields from WorldQuant Brain across multiple datasets with random sampling.
-        Restricted to stable datasets to improve expression robustness.
-        """
-        datasets = ['fundamental6', 'fundamental2']
-        all_fields = []
-        
-        base_params = {
-            'delay': 1,
-            'instrumentType': 'EQUITY',
-            'limit': 20,
-            'region': 'USA',
-            'universe': 'TOP3000'
-        }
-        
-        try:
-            print("Requesting data fields from multiple datasets...")
-            for dataset in datasets:
-                # First get the count
-                params = base_params.copy()
-                params['dataset.id'] = dataset
-                params['limit'] = 1  # Just to get count efficiently
-                
-                print(f"Getting field count for dataset: {dataset}")
-                count_response = self.sess.get('https://api.worldquantbrain.com/data-fields', params=params)
-                
-                if count_response.status_code == 200:
-                    count_data = count_response.json()
-                    total_fields = count_data.get('count', 0)
-                    print(f"Total fields in {dataset}: {total_fields}")
-                    
-                    if total_fields > 0:
-                        # Generate random offset
-                        max_offset = max(0, total_fields - base_params['limit'])
-                        random_offset = random.randint(0, max_offset)
-                        
-                        # Fetch random subset
-                        params['offset'] = random_offset
-                        params['limit'] = min(20, total_fields)  # Don't exceed total fields
-                        
-                        print(f"Fetching fields for {dataset} with offset {random_offset}")
-                        response = self.sess.get('https://api.worldquantbrain.com/data-fields', params=params)
-                        
-                        if response.status_code == 200:
-                            data = response.json()
-                            fields = data.get('results', [])
-                            print(f"Found {len(fields)} fields in {dataset}")
-                            all_fields.extend(fields)
-                        else:
-                            print(f"Failed to fetch fields for {dataset}: {response.text[:500]}")
-                else:
-                    print(f"Failed to get count for {dataset}: {count_response.text[:500]}")
-            
-            # Remove duplicates if any
-            unique_fields = {field['id']: field for field in all_fields}.values()
-            categorical_suffixes = ['_naicss', '_sector', '_industry', '_sic', '_exchange',
-                                    '_country', '_currency', '_region', '_subindustry', '_city']
-            numeric_fields = []
-            for field in unique_fields:
-                field_id = field.get('id', '')
-                field_id_lower = field_id.lower()
-                is_categorical = any(field_id_lower.endswith(s) or s + '_' in field_id_lower for s in categorical_suffixes)
-                if not is_categorical:
-                    numeric_fields.append(field)
-            print(f"Total numeric fields found: {len(numeric_fields)} (filtered out categorical fields)")
-            return numeric_fields
-            
-        except Exception as e:
-            logger.error(f"Failed to fetch data fields: {e}")
-            return []
+        if self._cached_fields:
+            return self._cached_fields
+
+        fields = self.data_field_fetcher.fetch_data_fields(
+            region=self.region_config.region,
+            universe=self.region_config.universe,
+            delay=self.region_config.delay,
+        )
+
+        self.smart_search.update_fields(self.data_field_fetcher.data_fields)
+
+        numeric_fields = self.data_field_fetcher.get_numeric_fields(
+            f"{self.region_config.region}_{self.region_config.universe}_{self.region_config.delay}"
+        )
+
+        self._cached_fields = numeric_fields
+        logger.info(f"Using {len(numeric_fields)} numeric data fields (cached)")
+        return numeric_fields
 
     def get_operators(self) -> List[Dict]:
-        """Fetch available operators from WorldQuant Brain."""
-        print("Requesting operators...")
-        response = self.sess.get('https://api.worldquantbrain.com/operators')
-        print(f"Operators response status: {response.status_code}")
-        print(f"Operators response: {response.text[:500]}...")  # Print first 500 chars
-        
-        if response.status_code != 200:
-            raise Exception(f"Failed to get operators: {response.text}")
-        
-        data = response.json()
-        # The operators endpoint might return a direct array instead of an object with 'items' or 'results'
-        if isinstance(data, list):
-            return data
-        elif 'results' in data:
-            return data['results']
-        else:
-            raise Exception(f"Unexpected operators response format. Response: {data}")
+        if self._cached_operators:
+            return self._cached_operators
+
+        operators = self.operator_fetcher.fetch_operators()
+        self._cached_operators = operators
+        logger.info(f"Using {len(operators)} operators (cached)")
+        return operators
 
     def clean_alpha_ideas(self, ideas: List[str]) -> List[str]:
+        self._ensure_initialized()
         cleaned_ideas = []
-        categorical_patterns = [
-            r'_naicss\b', r'_sector\b', r'_industry\b', r'_sic\b', r'_exchange\b',
-            r'_country\b', r'_currency\b', r'_region\b', r'_subindustry\b', r'_city\b',
-            r'\bnaicss\b', r'\bsic_code\b',
-        ]
-        ts_operators = ['ts_mean', 'ts_std_dev', 'ts_rank', 'ts_sum', 'ts_product',
-                        'ts_delta', 'ts_min', 'ts_max', 'ts_covariance', 'ts_corr',
-                        'ts_regression', 'ts_zscore', 'ts_skewness', 'ts_kurtosis']
-        
         for idea in ideas:
             if re.match(r'^\d+\.?$|^[a-zA-Z]+$', idea):
                 continue
@@ -228,51 +202,15 @@ class AlphaGenerator:
             if ('=' in idea) or (';' in idea) or idea.startswith('Comment:'):
                 continue
             
-            risky_keywords = ['if_else', 'trade_when', 'bucket', 'equal(', 'greater(', 'less(', 'not_equal', 'normalize(']
-            if any(k in idea for k in risky_keywords):
+            is_valid, errors = self.ast_validator.validate(idea)
+            if not is_valid:
+                logger.debug(f"AST rejected: {idea[:60]} | errors: {errors}")
                 continue
-            
-            if idea.count('(') != idea.count(')'):
-                continue
-            
-            valid_functions = [
-                'ts_mean', 'ts_sum', 'ts_rank', 'ts_std_dev', 'rank', 'zscore', 'log', 'sqrt',
-                'divide', 'subtract', 'add', 'multiply',
-                'group_mean', 'group_neutralize', 'group_zscore', 'ts_product']
-            if not any(func in idea for func in valid_functions):
-                continue
-            
-            cat_field_used_in_ts = False
-            for cp in categorical_patterns:
-                if re.search(cp, idea, re.IGNORECASE):
-                    for ts_op in ts_operators:
-                        ts_pattern = ts_op + r'\s*\([^)]*' + cp.replace(r'\b', '')
-                        if re.search(ts_pattern, idea, re.IGNORECASE):
-                            cat_field_used_in_ts = True
-                            break
-                if cat_field_used_in_ts:
-                    break
-            if cat_field_used_in_ts:
-                logger.info(f"Rejected: categorical field used in TS operator: {idea[:80]}")
-                continue
-            
-            for group_arg in ['sector', 'industry', 'subindustry', 'market']:
-                idea = re.sub(
-                    r'["\u201c\u201d\u2018\u2019\']' + group_arg + r'["\u201c\u201d\u2018\u2019\']',
-                    group_arg,
-                    idea
-                )
-            
-            if 'group_neutralize(' in idea or 'group_mean(' in idea or 'group_zscore(' in idea:
-                has_valid_group = bool(re.search(
-                    r'(?:sector|industry|subindustry|market)\s*\)',
-                    idea
-                ))
-                if not has_valid_group:
-                    logger.info(f"Rejected: group operator with invalid group arg: {idea[:80]}")
-                    continue
             
             cleaned_ideas.append(idea)
+        
+        if len(cleaned_ideas) > 1:
+            cleaned_ideas = self.template_similarity.deduplicate(cleaned_ideas)
         
         return cleaned_ideas
 
@@ -314,10 +252,13 @@ class AlphaGenerator:
                                    f"  Description: {op['description']}")
                 return formatted
 
+            sampled_fields = random.sample(data_fields, min(30, len(data_fields)))
+            field_ids_for_prompt = [field['id'] for field in sampled_fields]
+
             prompt = f"""Generate 5 unique, realistic FASTEXPR alpha expressions using only the provided operators and data fields. Return ONLY the expressions, one per line, with no comments or explanations.
 
 Available Data Fields:
-{[field['id'] for field in data_fields]}
+{field_ids_for_prompt}
 
 Available Operators by Category:
 Time Series:
@@ -384,7 +325,7 @@ rank(ts_std_dev(returns, 60))
                 response = requests.post(
                     f'{self.ollama_url}/api/generate',
                     json=ollama_data,
-                    timeout=360  # 6 minutes timeout
+                    timeout=600  # 10 minutes timeout for large models
                 )
 
                 print(f"Ollama API response status: {response.status_code}")
@@ -399,7 +340,7 @@ rank(ts_std_dev(returns, 60))
                     raise Exception(f"Ollama API request failed: {response.text}")
                     
             except requests.exceptions.Timeout:
-                logger.error("Ollama API request timed out (360s)")
+                logger.error("Ollama API request timed out (600s)")
                 # Trigger model downgrade for timeouts
                 self._handle_ollama_error("timeout")
                 return []
@@ -671,24 +612,10 @@ rank(ts_std_dev(returns, 60))
         return result
 
     def _test_alpha_impl(self, alpha_expression: str) -> Dict:
-        """Implementation of alpha testing with proper URL handling."""
         def submit_simulation():
             simulation_data = {
                 'type': 'REGULAR',
-                'settings': {
-                    'instrumentType': 'EQUITY',
-                    'region': 'USA',
-                    'universe': 'TOP3000',
-                    'delay': 1,
-                    'decay': 0,
-                    'neutralization': 'INDUSTRY',
-                    'truncation': 0.01,
-                    'pasteurization': 'ON',
-                    'unitHandling': 'VERIFY',
-                    'nanHandling': 'OFF',
-                    'language': 'FASTEXPR',
-                    'visualization': False,
-                },
+                'settings': self.region_config.to_simulation_settings(),
                 'regular': alpha_expression
             }
             return self.sess.post('https://api.worldquantbrain.com/simulations', json=simulation_data, timeout=(30, 120))
@@ -742,6 +669,30 @@ rank(ts_std_dev(returns, 60))
     def log_hopeful_alpha(self, expression: str, alpha_data: Dict) -> None:
         from .alpha_store import save_alpha
         save_alpha(expression, alpha_data, source="generator")
+
+        is_data = alpha_data.get("is", {})
+        fitness = is_data.get("fitness")
+        sharpe = is_data.get("sharpe")
+        turnover = is_data.get("turnover")
+        returns_val = is_data.get("returns")
+        success = fitness is not None and fitness >= 1.0
+
+        self.self_optimizer.record_result(
+            expression=expression,
+            fitness=fitness,
+            sharpe=sharpe,
+            turnover=turnover,
+            success=success,
+        )
+
+        self.quality_monitor.record(AlphaMetrics(
+            expression=expression,
+            fitness=fitness,
+            sharpe=sharpe,
+            turnover=turnover,
+            returns=returns_val,
+            source="generator",
+        ))
 
     def get_results(self) -> List[Dict]:
         """Get all processed results including retried alphas."""

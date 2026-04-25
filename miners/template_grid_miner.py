@@ -7,6 +7,11 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 from core.log_manager import setup_logger
+from core.region_config import get_region_config
+from core.expression_compiler import ExpressionCompiler
+from core.ast_validator import ASTValidator
+from core.data_fetcher import OperatorFetcher, DataFieldFetcher
+
 logger = setup_logger(__name__, "miner")
 
 
@@ -22,23 +27,11 @@ def auth_session() -> requests.Session:
     return s
 
 
-def submit_sim(s: requests.Session, expression: str) -> dict:
+def submit_sim(s: requests.Session, expression: str, region_key: str = "USA") -> dict:
+    region_config = get_region_config(region_key)
     data = {
         'type': 'REGULAR',
-        'settings': {
-            'instrumentType': 'EQUITY',
-            'region': 'USA',
-            'universe': 'TOP3000',
-            'delay': 1,
-            'decay': 0,
-            'neutralization': 'INDUSTRY',
-            'truncation': 0.01,
-            'pasteurization': 'ON',
-            'unitHandling': 'VERIFY',
-            'nanHandling': 'OFF',
-            'language': 'FASTEXPR',
-            'visualization': False,
-        },
+        'settings': region_config.to_simulation_settings(),
         'regular': expression
     }
     r = s.post('https://api.worldquantbrain.com/simulations', json=data)
@@ -73,39 +66,66 @@ def monitor_sim(s: requests.Session, progress_url: str, timeout_s: int = 3600) -
     return {'status': 'timeout'}
 
 
-def generate_templates() -> List[str]:
-    wins = [20, 60, 120, 252]
-    ranks = [5, 20]
-    exprs: List[str] = []
-    for w in wins:
-        exprs.append(f'group_neutralize(zscore(ts_mean(returns, {w})), sector)')
-    for w1 in wins:
-        for w2 in wins:
-            if w2 > w1:
-                exprs.append(f'group_neutralize(zscore(ts_mean(returns, {w1}) - ts_mean(returns, {w2})), sector)')
-    for w in wins:
-        for r in ranks:
-            exprs.append(f'group_neutralize(zscore(ts_rank(ts_mean(returns, {w}), {r})), sector)')
-    exprs.append('group_neutralize(zscore(rank(divide(revenue, assets))), sector)')
-    return exprs
+def generate_templates_from_compiler(
+    compiler: ExpressionCompiler,
+    field_ids: List[str],
+    max_expressions: int = 500,
+) -> List[str]:
+    templates = ExpressionCompiler.get_default_templates()
+    replacements = {
+        "FIELD": field_ids[:30],
+        "FIELD2": field_ids[:20],
+        "WINDOW": [5, 20, 60, 120, 252],
+        "WINDOW2": [60, 120, 252],
+        "GROUP": ["sector", "industry"],
+        "RANK": ["5", "20"],
+        "OP": ["rank", "zscore", "log", "sqrt"],
+    }
+    expressions = compiler.compile_templates(templates, replacements, max_expressions=max_expressions)
+    return expressions
 
 
 def main():
     parser = argparse.ArgumentParser(description='Template+Grid Alpha Miner')
     parser.add_argument('--max', type=int, default=30, help='Max expressions to test')
     parser.add_argument('--timeout', type=int, default=3600, help='Per-simulation timeout (s)')
+    parser.add_argument('--region', type=str, default='USA', help='Region key (USA, CHN, EUR, etc.)')
     parser.add_argument('--log-level', type=str, default='INFO', choices=['DEBUG','INFO','WARNING','ERROR'])
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level), format='%(asctime)s - %(levelname)s - %(message)s')
 
     s = auth_session()
-    exprs = generate_templates()[:args.max]
-    results = []
 
+    operator_fetcher = OperatorFetcher(session=s)
+    operators = operator_fetcher.fetch_operators()
+    operator_names = [op.get("name", "") for op in operators if op.get("name")]
+
+    data_field_fetcher = DataFieldFetcher(session=s)
+    region_config = get_region_config(args.region)
+    fields = data_field_fetcher.fetch_data_fields(
+        region=region_config.region,
+        universe=region_config.universe,
+        delay=region_config.delay,
+    )
+    field_ids = [f.get("id", "") for f in fields if f.get("id")]
+
+    compiler = ExpressionCompiler(
+        operators=operator_names,
+        fields=field_ids,
+    )
+    ast_validator = ASTValidator(known_operators=set(operator_names))
+
+    exprs = generate_templates_from_compiler(compiler, field_ids, max_expressions=args.max * 5)
+    valid_exprs, invalid = ast_validator.validate_batch(exprs)
+    exprs = valid_exprs[:args.max]
+
+    logger.info(f"Testing {len(exprs)} expressions (from {len(valid_exprs)} valid, {len(invalid)} rejected by AST)")
+
+    results = []
     for i, expr in enumerate(exprs, 1):
         logger.info(f'Testing {i}/{len(exprs)}: {expr}')
-        sub = submit_sim(s, expr)
+        sub = submit_sim(s, expr, region_key=args.region)
         if sub.get('status') != 'success':
             logger.warning(f"Submit error: {sub.get('message')}")
             continue
@@ -116,7 +136,6 @@ def main():
             fitness = is_data.get('fitness')
             sharpe = is_data.get('sharpe')
             logger.info(f"Completed. Fitness={fitness}, Sharpe={sharpe}")
-            # Append to hopeful if strong
             if fitness is not None and fitness > 1:
                 try:
                     from core.alpha_store import save_alpha
@@ -129,6 +148,7 @@ def main():
             logger.warning(f"Simulation failed: {mon.get('message')}")
         results.append({'expression': expr, 'result': mon})
 
+    os.makedirs('results', exist_ok=True)
     with open(os.path.join('results', 'template_grid_results.json'),'w') as f:
         json.dump(results, f, indent=2)
     logger.info('Template+Grid mining complete')
@@ -136,5 +156,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-

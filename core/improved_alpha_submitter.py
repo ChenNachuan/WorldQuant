@@ -392,6 +392,71 @@ class ImprovedAlphaSubmitter:
         except Exception as e:
             logger.error(f"Error cleaning up alpha store: {str(e)}")
 
+    def mark_alpha_green(self, alpha_id: str) -> bool:
+        url = f"https://api.worldquantbrain.com/alphas/{alpha_id}"
+        try:
+            response = self.sess.patch(url, json={"color": "green"})
+            if response.status_code in (200, 204):
+                logger.info(f"Marked alpha {alpha_id} as GREEN")
+                return True
+            else:
+                logger.warning(f"Failed to mark alpha {alpha_id} green: {response.status_code}")
+                return False
+        except Exception as e:
+            logger.error(f"Error marking alpha {alpha_id} green: {e}")
+            return False
+
+    def mark_submittable_alphas_green(self) -> int:
+        marked = 0
+        url = "https://api.worldquantbrain.com/users/self/alphas"
+        params = {
+            "limit": 50,
+            "offset": 0,
+            "status": "UNSUBMITTED",
+            "is.fitness>": 1,
+            "is.sharpe>": 1.25,
+            "order": "-is.fitness",
+            "hidden": "false",
+        }
+
+        while True:
+            try:
+                response = self.sess.get(url, params=params, timeout=(15, 60))
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", 30))
+                    logger.info(f"Rate limited, waiting {retry_after}s")
+                    time.sleep(retry_after)
+                    continue
+                if response.status_code != 200:
+                    logger.error(f"Failed to fetch alphas: {response.status_code}")
+                    break
+
+                data = response.json()
+                results = data.get("results", [])
+
+                for alpha in results:
+                    alpha_id = alpha.get("id")
+                    checks = alpha.get("is", {}).get("checks", [])
+                    has_fail = any(c.get("result") == "FAIL" for c in checks)
+
+                    if not has_fail and alpha_id:
+                        current_color = alpha.get("color")
+                        if current_color != "green":
+                            if self.mark_alpha_green(alpha_id):
+                                marked += 1
+                            time.sleep(1)
+
+                if not data.get("next") or len(results) < params["limit"]:
+                    break
+                params["offset"] += params["limit"]
+
+            except Exception as e:
+                logger.error(f"Error in mark_submittable_alphas_green: {e}")
+                break
+
+        logger.info(f"Marked {marked} submittable alphas as green")
+        return marked
+
     def batch_submit(self, batch_size: int = 3) -> None:
         """Submit alphas in batches with improved error handling."""
         logger.info(f"Starting batch submission with batch size {batch_size}")

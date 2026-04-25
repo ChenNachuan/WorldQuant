@@ -1,6 +1,6 @@
 [project]
 name = "worldquant-alpha"
-version = "0.1.0"
+version = "0.2.0"
 description = "基于本地Ollama大语言模型的智能Alpha因子生成系统"
 readme = "README.md"
 requires-python = ">=3.11"

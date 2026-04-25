@@ -1,0 +1,55 @@
+version: "3.8"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: wq-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  alpha-miner:
+    build: .
+    container_name: wq-alpha-miner
+    depends_on:
+      - ollama
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ./cache:/app/cache
+      - ./alpha:/app/alpha
+      - ./log:/app/log
+      - ./results:/app/results
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    container_name: wq-dashboard
+    command: ["python", "-m", "web.dashboard"]
+    depends_on:
+      - ollama
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ./cache:/app/cache
+      - ./alpha:/app/alpha
+      - ./log:/app/log
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
