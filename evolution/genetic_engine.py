@@ -91,31 +91,89 @@ class GeneticEngine:
         return winner[0]
 
     def _crossover(self, parent1: str, parent2: str) -> List[str]:
+        """Intelligent crossover: swap sub-expressions between two parents.
+
+        Strategy 1 (operator swap): Take outer operator from p1, inner args from p2
+        Strategy 2 (field swap): Replace fields in p1 with fields from p2
+        Strategy 3 (wrap swap): Wrap p2's core with p1's outer structure
+        """
         children = []
 
-        parts1 = self._decompose(parent1)
-        parts2 = self._decompose(parent2)
+        # Extract structure from both parents
+        outer1, args1 = self._extract_outer_and_args(parent1)
+        outer2, args2 = self._extract_outer_and_args(parent2)
 
-        if parts1 and parts2:
-            cut1 = random.randint(1, max(1, len(parts1) - 1)) if len(parts1) > 1 else 0
-            cut2 = random.randint(0, max(0, len(parts2) - 1)) if len(parts2) > 0 else 0
-
-            child1_parts = parts1[:cut1] + parts2[cut2:]
-            child2_parts = parts2[:cut2] + parts1[cut1:]
-
-            child1 = self._recompose(child1_parts)
-            child2 = self._recompose(child2_parts)
-
-            if child1 and self._is_valid_expression(child1):
+        # Strategy 1: outer(p1) + args(p2) → child1; outer(p2) + args(p1) → child2
+        if outer1 and args2:
+            child1 = f"{outer1}({', '.join(args2)})"
+            if self._is_valid_expression(child1):
                 children.append(child1)
-            if child2 and self._is_valid_expression(child2):
+        if outer2 and args1:
+            child2 = f"{outer2}({', '.join(args1)})"
+            if self._is_valid_expression(child2):
                 children.append(child2)
 
+        # Strategy 2: swap fields between parents
+        fields1 = re.findall(r"\b([a-z][a-z0-9_]*(?:_[a-z0-9_]+)+)\b", parent1, re.IGNORECASE)
+        fields2 = re.findall(r"\b([a-z][a-z0-9_]*(?:_[a-z0-9_]+)+)\b", parent2, re.IGNORECASE)
+        non_op1 = [f for f in fields1 if not any(f.startswith(p) for p in ["ts_", "group_"])]
+        non_op2 = [f for f in fields2 if not any(f.startswith(p) for p in ["ts_", "group_"])]
+
+        if non_op1 and non_op2:
+            child3 = parent1.replace(random.choice(non_op1), random.choice(non_op2), 1)
+            if child3 != parent1 and self._is_valid_expression(child3):
+                children.append(child3)
+
+        # Strategy 3: wrap one parent's core inside the other's outer function
+        if outer1 and self._is_valid_expression(parent2):
+            child4 = f"{outer1}({parent2})"
+            if self._is_valid_expression(child4) and len(child4) < 300:
+                children.append(child4)
+
+        # Fallback: mutate both parents
         if not children:
             children.append(self._mutate(parent1))
             children.append(self._mutate(parent2))
 
-        return children
+        return children[:3]  # Return at most 3 children
+
+    def _extract_outer_and_args(self, expr: str) -> Tuple[str, List[str]]:
+        """Extract the outermost function call and its arguments.
+
+        Example: 'rank(ts_corr(close, volume, 10))' → ('rank', ['ts_corr(close, volume, 10)'])
+        Example: 'ts_mean(returns, 20)' → ('ts_mean', ['returns', '20'])
+        """
+        expr = expr.strip()
+        match = re.match(r'^(-?\s*)([a-zA-Z_][a-zA-Z0-9_]*)\((.+)\)$', expr, re.DOTALL)
+        if not match:
+            return "", []
+
+        prefix = match.group(1).strip()
+        func_name = match.group(2)
+        inner = match.group(3)
+        outer = f"{prefix}{func_name}" if prefix else func_name
+
+        # Split arguments respecting parentheses depth
+        args = []
+        depth = 0
+        current = ""
+        for ch in inner:
+            if ch == "(":
+                depth += 1
+                current += ch
+            elif ch == ")":
+                depth -= 1
+                current += ch
+            elif ch == "," and depth == 0:
+                args.append(current.strip())
+                current = ""
+            else:
+                current += ch
+        if current.strip():
+            args.append(current.strip())
+
+        return outer, args
+
 
     def _mutate(self, expression: str) -> str:
         mutation_type = random.choice(["window", "field", "operator", "wrap", "unwrap"])

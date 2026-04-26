@@ -3,12 +3,15 @@ import sys
 import random
 import re
 import json
+import difflib
 from typing import List, Dict, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, ".")
 
 from core.alpha_generator_ollama import AlphaGenerator
 from core.alpha_store import load_all_alphas, save_alpha
+from core.alpha_db import get_alpha_db, AlphaDB
 from core.data_fetcher import OperatorFetcher, DataFieldFetcher, SmartSearch
 from core.ast_validator import ASTValidator
 from core.expression_compiler import ExpressionCompiler
@@ -34,6 +37,7 @@ class AlphaMiningPipeline:
     ):
         self.region_key = region_key
         self.target = target_submittable
+        self.max_concurrent = max_concurrent
         self.region_config = get_region_config(region_key)
 
         logger.info(f"Initializing pipeline for {region_key} ({self.region_config.universe})")
@@ -53,6 +57,9 @@ class AlphaMiningPipeline:
         self.self_optimizer = SelfOptimizer()
         self.quality_monitor = QualityMonitor()
         self.template_similarity = TemplateSimilarity()
+
+        # SQLite storage (improvement #1)
+        self.db: AlphaDB = get_alpha_db()
 
         self.operators: List[Dict] = []
         self.operator_names: List[str] = []
@@ -251,85 +258,176 @@ class AlphaMiningPipeline:
         return expressions
 
     def _test_and_record(self, expressions: List[str]):
-        for expr in expressions:
-            try:
-                result = self.generator._test_alpha_impl(expr)
+        """Test expressions using ThreadPoolExecutor for true concurrent simulation."""
+        # Skip already-tested expressions (dedup via SQLite)
+        novel = [e for e in expressions if not self.db.expression_exists(e, self.region_key)]
+        if len(novel) < len(expressions):
+            logger.info(f"SQLite dedup: {len(expressions)} -> {len(novel)} novel expressions")
+        if not novel:
+            return
 
-                if result.get("status") == "error":
-                    error_msg = result.get("message", "")
-                    self.failed_alphas.append((expr, error_msg))
-                    self.self_optimizer.record_result(
-                        expression=expr, fitness=None, sharpe=None,
-                        turnover=None, success=False,
-                    )
-                    self.quality_monitor.record(AlphaMetrics(
-                        expression=expr, source="pipeline", fitness=None,
-                    ))
-                    continue
+        # Concurrent simulation (improvement #6)
+        with ThreadPoolExecutor(max_workers=self.max_concurrent) as pool:
+            future_to_expr = {
+                pool.submit(self._test_single_expression, expr): expr
+                for expr in novel
+            }
+            for future in as_completed(future_to_expr):
+                expr = future_to_expr[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Concurrent test error {expr[:40]}: {e}")
+                    self.failed_alphas.append((expr, str(e)))
 
-                progress_url = result.get("result", {}).get("progress_url")
-                if not progress_url:
-                    self.failed_alphas.append((expr, "no progress url"))
-                    continue
+    def _test_single_expression(self, expr: str):
+        """Test a single expression — designed to run in a thread."""
+        try:
+            result = self.generator._test_alpha_impl(expr)
 
-                alpha_data = self._monitor_simulation(progress_url)
-                if alpha_data:
-                    is_data = alpha_data.get("is", {})
-                    fitness = is_data.get("fitness")
-                    sharpe = is_data.get("sharpe")
-                    turnover = is_data.get("turnover")
-                    returns_val = is_data.get("returns")
+            if result.get("status") == "error":
+                error_msg = result.get("message", "")
 
-                    success = (
-                        fitness is not None and fitness >= 1.0
-                        and sharpe is not None and sharpe >= 1.25
-                    )
-
-                    save_alpha(expr, alpha_data, source="pipeline")
-
-                    # Alpha Flipper: recycle extremely negative-Sharpe alphas
-                    if not success and sharpe is not None and sharpe <= -1.0:
-                        logger.info(f"💡 Alpha Flipper triggered! Sharpe={sharpe:.2f}, flipping sign...")
-                        if expr.startswith("-rank("):
-                            flipped_expr = expr.replace("-rank(", "rank(", 1)
-                        elif expr.startswith("rank("):
-                            flipped_expr = "-1 * " + expr
-                        else:
-                            flipped_expr = f"-1 * ({expr})"
-                        existing_exprs = (
-                            {e for e, _ in self.failed_alphas}
-                            | {e for e, _ in self.successful_alphas}
-                        )
-                        if flipped_expr not in existing_exprs:
-                            self.generator.retry_queue.add(flipped_expr)
-                            logger.info(f"  ↪ Queued flipped: {flipped_expr[:60]}...")
-
-                    self.self_optimizer.record_result(
-                        expression=expr, fitness=fitness, sharpe=sharpe,
-                        turnover=turnover, success=success,
-                    )
-                    self.quality_monitor.record(AlphaMetrics(
-                        expression=expr, fitness=fitness, sharpe=sharpe,
-                        turnover=turnover, returns=returns_val, source="pipeline",
-                    ))
-
-                    if success:
-                        self.successful_alphas.append((expr, fitness or 0))
-                        alpha_id = alpha_data.get("id")
-                        if alpha_id:
-                            self._mark_green(alpha_id)
-                        logger.info(f"SUCCESS: {expr[:60]}... fitness={fitness:.4f} sharpe={sharpe}")
-                    else:
-                        self.failed_alphas.append((expr, f"fitness={fitness} sharpe={sharpe}"))
-                        logger.info(f"Failed: {expr[:60]}... fitness={fitness} sharpe={sharpe}")
+                # Self-correction (improvement #2): try to fix and retry
+                fixed_expr = self._try_self_correct(expr, error_msg)
+                if fixed_expr and fixed_expr != expr:
+                    logger.info(f"🔧 Self-corrected: {expr[:40]}... → {fixed_expr[:40]}...")
+                    self.db.save_error(expr, "submit_error", error_msg, fixed_expr, False)
+                    # Re-test the fixed expression
+                    result = self.generator._test_alpha_impl(fixed_expr)
+                    if result.get("status") == "error":
+                        self.failed_alphas.append((expr, error_msg))
+                        self._record_failure(expr)
+                        return
+                    expr = fixed_expr  # Use the fixed version going forward
                 else:
-                    self.failed_alphas.append((expr, "simulation failed"))
+                    self.failed_alphas.append((expr, error_msg))
+                    self.db.save_error(expr, "submit_error", error_msg)
+                    self._record_failure(expr)
+                    return
 
-            except Exception as e:
-                logger.error(f"Error testing {expr[:40]}: {e}")
-                self.failed_alphas.append((expr, str(e)))
+            progress_url = result.get("result", {}).get("progress_url")
+            if not progress_url:
+                self.failed_alphas.append((expr, "no progress url"))
+                return
 
-            time.sleep(2)
+            alpha_data = self._monitor_simulation(progress_url)
+            if alpha_data:
+                is_data = alpha_data.get("is", {})
+                fitness = is_data.get("fitness")
+                sharpe = is_data.get("sharpe")
+                turnover = is_data.get("turnover")
+                returns_val = is_data.get("returns")
+
+                success = (
+                    fitness is not None and fitness >= 1.0
+                    and sharpe is not None and sharpe >= 1.25
+                )
+
+                # Save to both JSON (backward compat) and SQLite
+                save_alpha(expr, alpha_data, source="pipeline")
+                self.db.save_alpha(expr, alpha_data, source="pipeline")
+
+                # Alpha Flipper: recycle extremely negative-Sharpe alphas
+                if not success and sharpe is not None and sharpe <= -1.0:
+                    logger.info(f"💡 Alpha Flipper triggered! Sharpe={sharpe:.2f}, flipping sign...")
+                    if expr.startswith("-rank("):
+                        flipped_expr = expr.replace("-rank(", "rank(", 1)
+                    elif expr.startswith("rank("):
+                        flipped_expr = "-1 * " + expr
+                    else:
+                        flipped_expr = f"-1 * ({expr})"
+                    existing_exprs = (
+                        {e for e, _ in self.failed_alphas}
+                        | {e for e, _ in self.successful_alphas}
+                    )
+                    if flipped_expr not in existing_exprs:
+                        self.generator.retry_queue.add(flipped_expr)
+                        logger.info(f"  ↪ Queued flipped: {flipped_expr[:60]}...")
+
+                self.self_optimizer.record_result(
+                    expression=expr, fitness=fitness, sharpe=sharpe,
+                    turnover=turnover, success=success,
+                )
+                self.quality_monitor.record(AlphaMetrics(
+                    expression=expr, fitness=fitness, sharpe=sharpe,
+                    turnover=turnover, returns=returns_val, source="pipeline",
+                ))
+
+                if success:
+                    self.successful_alphas.append((expr, fitness or 0))
+                    alpha_id = alpha_data.get("id")
+                    if alpha_id:
+                        self._mark_green(alpha_id)
+                    logger.info(f"SUCCESS: {expr[:60]}... fitness={fitness:.4f} sharpe={sharpe}")
+                else:
+                    self.failed_alphas.append((expr, f"fitness={fitness} sharpe={sharpe}"))
+                    logger.info(f"Failed: {expr[:60]}... fitness={fitness} sharpe={sharpe}")
+            else:
+                self.failed_alphas.append((expr, "simulation failed"))
+
+        except Exception as e:
+            logger.error(f"Error testing {expr[:40]}: {e}")
+            self.failed_alphas.append((expr, str(e)))
+
+    def _record_failure(self, expr: str):
+        """Record a failed expression to optimizer and quality monitor."""
+        self.self_optimizer.record_result(
+            expression=expr, fitness=None, sharpe=None,
+            turnover=None, success=False,
+        )
+        self.quality_monitor.record(AlphaMetrics(
+            expression=expr, source="pipeline", fitness=None,
+        ))
+
+    def _try_self_correct(self, expr: str, error_msg: str) -> Optional[str]:
+        """Attempt to fix a broken expression based on the API error message.
+
+        Improvement #2: Template Self-Correction.
+        """
+        if not error_msg:
+            return None
+
+        import re as _re
+
+        # Fix 1: Unknown variable — find closest matching field
+        unknown_var_match = _re.search(r'unknown variable "([^"]+)"', error_msg, _re.IGNORECASE)
+        if unknown_var_match:
+            bad_field = unknown_var_match.group(1)
+            closest = difflib.get_close_matches(bad_field, self.field_ids, n=1, cutoff=0.5)
+            if closest:
+                fixed = expr.replace(bad_field, closest[0])
+                logger.info(f"  🔧 Fix unknown var: '{bad_field}' → '{closest[0]}'")
+                return fixed
+            return None
+
+        # Fix 2: Unknown operator — find closest matching operator
+        unknown_op_match = _re.search(r'unknown (?:function|operator) "([^"]+)"', error_msg, _re.IGNORECASE)
+        if unknown_op_match:
+            bad_op = unknown_op_match.group(1)
+            closest = difflib.get_close_matches(bad_op, self.operator_names, n=1, cutoff=0.5)
+            if closest:
+                fixed = expr.replace(bad_op, closest[0])
+                logger.info(f"  🔧 Fix unknown op: '{bad_op}' → '{closest[0]}'")
+                return fixed
+            return None
+
+        # Fix 3: Missing lookback / wrong arg count — try adding/removing a window param
+        if "lookback" in error_msg.lower() or "input count" in error_msg.lower():
+            # Try adding a default window of 20
+            func_match = _re.search(r'(\w+)\(([^)]+)\)', expr)
+            if func_match:
+                func_name = func_match.group(1)
+                func_args = func_match.group(2)
+                if "," not in func_args:
+                    fixed = expr.replace(
+                        f"{func_name}({func_args})",
+                        f"{func_name}({func_args}, 20)"
+                    )
+                    logger.info(f"  🔧 Fix missing lookback: added window=20")
+                    return fixed
+
+        return None
 
     def _monitor_simulation(self, progress_url: str, timeout: int = 1800) -> Optional[Dict]:
         start = time.time()
@@ -432,8 +530,59 @@ class AlphaMiningPipeline:
             for reason, count in top_errors:
                 logger.info(f"  [{count}x] {reason}")
 
+        # Retrospect analysis (improvement #5)
+        self._print_retrospect_report()
+
         # Export DPO training dataset
         self.export_dpo_dataset()
+
+    def _print_retrospect_report(self):
+        """Print SQLite-backed retrospect analysis. (Improvement #5)"""
+        try:
+            report = self.db.get_retrospect_report(days=7)
+
+            logger.info(f"\n{'='*60}")
+            logger.info(f"RETROSPECT ANALYSIS (last 7 days)")
+            logger.info(f"{'='*60}")
+            logger.info(f"Total alphas in DB: {report['total_alphas']}")
+            logger.info(f"Recent (7d): {report['recent_alphas']}")
+            logger.info(f"Successful: {report['successful_alphas']}")
+
+            if report['daily_summary']:
+                logger.info(f"\n📊 Daily Summary:")
+                for day in report['daily_summary'][:7]:
+                    logger.info(
+                        f"  {day['day']}: tested={day['total_tested']}, "
+                        f"success={day['successes']}, "
+                        f"avg_fit={day['avg_fitness']}, max_fit={day['max_fitness']}, "
+                        f"max_sharpe={day['max_sharpe']}"
+                    )
+
+            if report['top_operators']:
+                logger.info(f"\n🏆 Top Operators (by avg fitness):")
+                for op in report['top_operators'][:5]:
+                    logger.info(
+                        f"  {op['operator']}: avg={op['avg_fitness']}, "
+                        f"max={op['max_fitness']}, count={op['count']}"
+                    )
+
+            if report['top_fields']:
+                logger.info(f"\n📋 Top Fields (by avg fitness):")
+                for field in report['top_fields'][:5]:
+                    logger.info(
+                        f"  {field['field']}: avg={field['avg_fitness']}, "
+                        f"count={field['count']}"
+                    )
+
+            if report['error_stats']:
+                logger.info(f"\n🔧 Error Self-Correction Stats:")
+                for err in report['error_stats'][:5]:
+                    logger.info(
+                        f"  {err['error_type']}: {err['count']}x, "
+                        f"fixed={err['fixed_count']} ({err['fix_rate']}%)"
+                    )
+        except Exception as e:
+            logger.warning(f"Retrospect report error: {e}")
 
     def export_dpo_dataset(self, filename: str = "dpo_training_data.jsonl"):
         """Export mining results as DPO fine-tuning pairs (chosen=success, rejected=fail)."""
