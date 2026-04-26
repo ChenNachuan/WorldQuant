@@ -331,7 +331,7 @@ class AlphaMiningPipeline:
 
             time.sleep(2)
 
-    def _monitor_simulation(self, progress_url: str, timeout: int = 600) -> Optional[Dict]:
+    def _monitor_simulation(self, progress_url: str, timeout: int = 1800) -> Optional[Dict]:
         start = time.time()
         while time.time() - start < timeout:
             try:
