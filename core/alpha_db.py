@@ -72,7 +72,22 @@ class AlphaDB:
                     truncation REAL DEFAULT 0.01,
                     status TEXT DEFAULT 'tested',
                     checks TEXT DEFAULT '[]',
+                    raw_json TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Upgrade existing DB with raw_json if it doesn't exist
+            try:
+                cur.execute("ALTER TABLE alphas ADD COLUMN raw_json TEXT")
+            except sqlite3.OperationalError:
+                pass # Column already exists
+                
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS active_simulations (
+                    id TEXT PRIMARY KEY,
+                    process_id INTEGER,
+                    start_time REAL
                 )
             """)
             cur.execute("""
@@ -129,8 +144,8 @@ class AlphaDB:
                     expression, alpha_id, fitness, sharpe, turnover,
                     returns, margin, long_count, short_count, grade,
                     source, region, universe, delay, decay,
-                    neutralization, truncation, status, checks
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    neutralization, truncation, status, checks, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(expression, region) DO UPDATE SET
                     fitness=excluded.fitness,
                     sharpe=excluded.sharpe,
@@ -140,6 +155,7 @@ class AlphaDB:
                     grade=excluded.grade,
                     status=excluded.status,
                     checks=excluded.checks,
+                    raw_json=excluded.raw_json,
                     created_at=CURRENT_TIMESTAMP
                 """,
                 (
@@ -160,8 +176,9 @@ class AlphaDB:
                     settings.get("decay", 0),
                     settings.get("neutralization", "INDUSTRY"),
                     settings.get("truncation", 0.01),
-                    "tested",
+                    alpha_data.get("status", "tested"),
                     json.dumps(is_data.get("checks", [])),
+                    json.dumps(alpha_data)
                 ),
             )
             return cur.lastrowid
@@ -185,6 +202,41 @@ class AlphaDB:
                 (expression, error_type, error_message, fixed_expression, int(fix_successful)),
             )
             return cur.lastrowid
+
+    # ── Concurrency operations ───────────────────────────────────────
+
+    def acquire_global_slot(self, sim_id: str, max_concurrent: int = 4, timeout: float = 300.0) -> bool:
+        """Acquire a global concurrency slot using SQLite."""
+        start_wait = time.time()
+        pid = os.getpid()
+        while time.time() - start_wait < timeout:
+            try:
+                with self._cursor() as cur:
+                    # Clean up extremely old zombies (> 1 hour)
+                    cur.execute("DELETE FROM active_simulations WHERE start_time < ?", (time.time() - 3600,))
+                    
+                    cur.execute("SELECT COUNT(*) FROM active_simulations")
+                    count = cur.fetchone()[0]
+                    if count < max_concurrent:
+                        cur.execute(
+                            "INSERT INTO active_simulations (id, process_id, start_time) VALUES (?, ?, ?)",
+                            (sim_id, pid, time.time())
+                        )
+                        return True
+            except sqlite3.IntegrityError:
+                pass  # ID already exists
+            except Exception as e:
+                logger.error(f"Error acquiring slot: {e}")
+            time.sleep(2)
+        return False
+
+    def release_global_slot(self, sim_id: str):
+        """Release a global concurrency slot."""
+        try:
+            with self._cursor() as cur:
+                cur.execute("DELETE FROM active_simulations WHERE id = ?", (sim_id,))
+        except Exception as e:
+            logger.error(f"Error releasing slot: {e}")
 
     # ── Read operations ──────────────────────────────────────────────
 

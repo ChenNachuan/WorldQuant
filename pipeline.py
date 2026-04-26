@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, ".")
 
 from core.alpha_generator_ollama import AlphaGenerator
-from core.alpha_store import load_all_alphas, save_alpha
 from core.alpha_db import get_alpha_db, AlphaDB
 from core.data_fetcher import OperatorFetcher, DataFieldFetcher, SmartSearch
 from core.ast_validator import ASTValidator
@@ -73,6 +72,8 @@ class AlphaMiningPipeline:
         self.successful_alphas: List[Tuple[str, float]] = []
         self.failed_alphas: List[Tuple[str, str]] = []
         self.generation_count = 0
+        self.alphas_to_heal: Dict[str, Dict] = {}  # {base_expr: {"iteration": 1, "feedback": ""}}
+
 
     def initialize(self):
         logger.info("Loading cached operators and data fields...")
@@ -146,7 +147,9 @@ class AlphaMiningPipeline:
             phase = self._select_phase()
             logger.info(f"Phase: {phase}")
 
-            if phase == "ai_generate":
+            if phase == "healer_evolve":
+                expressions = self._healer_evolve_phase()
+            elif phase == "ai_generate":
                 expressions = self._ai_generate_phase()
             elif phase == "genetic_evolve":
                 expressions = self._genetic_evolve_phase()
@@ -191,11 +194,46 @@ class AlphaMiningPipeline:
         self._print_final_report()
 
     def _select_phase(self) -> str:
+        if self.alphas_to_heal:
+            return "healer_evolve"
         if len(self.successful_alphas) >= 3 and self.generation_count % 3 == 1:
             return "genetic_evolve"
         if self.generation_count % 4 == 2:
             return "template_compile"
         return "ai_generate"
+
+    def _healer_evolve_phase(self) -> List[str]:
+        if not self.alphas_to_heal:
+            return []
+            
+        base_expr = list(self.alphas_to_heal.keys())[0]
+        state = self.alphas_to_heal[base_expr]
+        
+        if state["iteration"] > 3:
+            logger.info(f"Alpha {base_expr[:30]}... failed 3 healing iterations. Discarding.")
+            del self.alphas_to_heal[base_expr]
+            return self._ai_generate_phase()
+            
+        logger.info(f"Phase: Healer Evolve (Iteration {state['iteration']}/3) for {base_expr[:40]}...")
+        mutations = self.generator.heal_high_turnover_alpha(base_expr, state["feedback"])
+        
+        if not mutations:
+            logger.warning("Turnover healer returned no mutations.")
+            del self.alphas_to_heal[base_expr]
+            return []
+            
+        expressions = []
+        for mut in mutations:
+            expressions.append(mut)
+            
+        # We process this batch. The next time we evaluate the queue, we will increment iteration 
+        # based on results. For simplicity, we increment iteration now, and rely on _test_and_record
+        # to re-insert or update feedback if it fails. But wait, _test_and_record is stateless.
+        # Let's pass the state tracking to where we evaluate results in _test_and_record.
+        
+        state["iteration"] += 1
+        state["current_mutations"] = mutations  # track what we are testing
+        return expressions
 
     def _ai_generate_phase(self) -> List[str]:
         logger.info("Phase: AI Generate (Ollama)")
@@ -264,9 +302,13 @@ class AlphaMiningPipeline:
         if len(novel) < len(expressions):
             logger.info(f"SQLite dedup: {len(expressions)} -> {len(novel)} novel expressions")
         if not novel:
+            # If we are in healer phase and all are deduped (meaning we tried them), 
+            # we should mark them as failed to trigger next iteration.
+            self._evaluate_healing_results([])
             return
 
         # Concurrent simulation (improvement #6)
+        results = []
         with ThreadPoolExecutor(max_workers=self.max_concurrent) as pool:
             future_to_expr = {
                 pool.submit(self._test_single_expression, expr): expr
@@ -275,12 +317,50 @@ class AlphaMiningPipeline:
             for future in as_completed(future_to_expr):
                 expr = future_to_expr[future]
                 try:
-                    future.result()
+                    res = future.result()
+                    if res:
+                        results.append(res)
                 except Exception as e:
                     logger.error(f"Concurrent test error {expr[:40]}: {e}")
                     self.failed_alphas.append((expr, str(e)))
+                    
+        self._evaluate_healing_results(results)
 
-    def _test_single_expression(self, expr: str):
+    def _evaluate_healing_results(self, results: List[Dict]):
+        # Check if any base_expr in healing queue was just tested
+        for base_expr, state in list(self.alphas_to_heal.items()):
+            mutations = state.get("current_mutations", [])
+            if not mutations:
+                continue
+                
+            # Find results for these mutations
+            mut_results = [r for r in results if r["expr"] in mutations]
+            if not mut_results:
+                # None of the mutations were successfully simulated or all were duplicates
+                state["feedback"] += f"Iteration {state['iteration']-1}: All mutations failed simulation or were duplicates.\n"
+                continue
+                
+            # Check if any succeeded
+            success = any(r["success"] for r in mut_results)
+            if success:
+                logger.info(f"Successfully healed alpha! Removing {base_expr[:40]} from queue.")
+                del self.alphas_to_heal[base_expr]
+                continue
+                
+            # If failed, find the one with best Sharpe to generate feedback
+            best_mut = max(mut_results, key=lambda x: x.get("sharpe", -99) if x.get("sharpe") is not None else -99)
+            sharpe = best_mut.get("sharpe", 0)
+            tov = best_mut.get("turnover", 0)
+            expr = best_mut["expr"]
+            
+            if sharpe is not None and sharpe < 1.0:
+                state["feedback"] += f"Attempt {state['iteration']-1}: Expression `{expr}` resulted in Sharpe={sharpe:.4f} and Turnover={tov:.4f}. This is a massive DROP in Sharpe ratio. DO NOT use that structural approach again.\n"
+            elif tov is not None and tov > 0.7:
+                state["feedback"] += f"Attempt {state['iteration']-1}: Expression `{expr}` resulted in Sharpe={sharpe:.4f} but Turnover={tov:.4f}. Turnover is STILL TOO HIGH. You need to use a STRONGER reduction method like Discretization or Boolean Masking.\n"
+            else:
+                state["feedback"] += f"Attempt {state['iteration']-1}: Failed for other reasons. Try again.\n"
+
+    def _test_single_expression(self, expr: str) -> Optional[Dict]:
         """Test a single expression — designed to run in a thread."""
         try:
             result = self.generator._test_alpha_impl(expr)
@@ -304,12 +384,12 @@ class AlphaMiningPipeline:
                     self.failed_alphas.append((expr, error_msg))
                     self.db.save_error(expr, "submit_error", error_msg)
                     self._record_failure(expr)
-                    return
+                    return {"expr": expr, "success": False}
 
             progress_url = result.get("result", {}).get("progress_url")
             if not progress_url:
                 self.failed_alphas.append((expr, "no progress url"))
-                return
+                return {"expr": expr, "success": False}
 
             alpha_data = self._monitor_simulation(progress_url)
             if alpha_data:
@@ -322,11 +402,17 @@ class AlphaMiningPipeline:
                 success = (
                     fitness is not None and fitness >= 1.0
                     and sharpe is not None and sharpe >= 1.25
+                    and turnover is not None and turnover <= 0.7
                 )
 
-                # Save to both JSON (backward compat) and SQLite
-                save_alpha(expr, alpha_data, source="pipeline")
+                # Save to SQLite only
                 self.db.save_alpha(expr, alpha_data, source="pipeline")
+
+                # Alpha Healer: recycle high-sharpe, high-turnover alphas
+                if not success and sharpe is not None and sharpe >= 1.25 and turnover is not None and turnover > 0.7:
+                    logger.info(f"🩺 Alpha Healer triggered! Sharpe={sharpe:.2f}, Tov={turnover:.2f}, Expr={expr[:40]}...")
+                    if expr not in self.alphas_to_heal:
+                        self.alphas_to_heal[expr] = {"iteration": 1, "feedback": "", "current_mutations": []}
 
                 # Alpha Flipper: recycle extremely negative-Sharpe alphas
                 if not success and sharpe is not None and sharpe <= -1.0:
@@ -361,14 +447,18 @@ class AlphaMiningPipeline:
                         self._mark_green(alpha_id)
                     logger.info(f"SUCCESS: {expr[:60]}... fitness={fitness:.4f} sharpe={sharpe}")
                 else:
-                    self.failed_alphas.append((expr, f"fitness={fitness} sharpe={sharpe}"))
-                    logger.info(f"Failed: {expr[:60]}... fitness={fitness} sharpe={sharpe}")
+                    self.failed_alphas.append((expr, f"fit={fitness} shp={sharpe} tov={turnover}"))
+                    logger.info(f"Rejected: {expr[:60]}... fit={fitness} shp={sharpe} tov={turnover}")
+                
+                return {"expr": expr, "success": success, "sharpe": sharpe, "turnover": turnover}
             else:
                 self.failed_alphas.append((expr, "simulation failed"))
+                return {"expr": expr, "success": False}
 
         except Exception as e:
             logger.error(f"Error testing {expr[:40]}: {e}")
             self.failed_alphas.append((expr, str(e)))
+            return {"expr": expr, "success": False}
 
     def _record_failure(self, expr: str):
         """Record a failed expression to optimizer and quality monitor."""

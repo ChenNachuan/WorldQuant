@@ -500,10 +500,11 @@ class AlphaOrchestrator:
         return True
 
     def run_alpha_expression_miner(self):
-        from .alpha_store import load_all_alphas, remove_alpha_by_expression
+        from .alpha_db import get_alpha_db
         logger.info("Starting alpha expression miner on promising alphas...")
         
-        promising_alphas = load_all_alphas()
+        db = get_alpha_db()
+        promising_alphas = db.get_all_alphas()
         
         if not promising_alphas:
             logger.info("No promising alphas found. Skipping mining.")
@@ -626,8 +627,9 @@ class AlphaOrchestrator:
         
         while self.running:
             try:
-                from .alpha_store import count_alphas
-                alpha_count = count_alphas()
+                from .alpha_db import get_alpha_db
+                db = get_alpha_db()
+                alpha_count = db.count_alphas()
                 if alpha_count > 0:
                     logger.info(f"Found {alpha_count} alphas to mine")
                     self.run_alpha_expression_miner()

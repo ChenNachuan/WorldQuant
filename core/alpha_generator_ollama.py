@@ -74,7 +74,8 @@ class AlphaGenerator:
         self.vram_cleanup_interval = 10
         self.operation_count = 0
         
-        self.initial_model = getattr(self, 'model_name', 'qwen3.5:35b')
+        self.model_name = getattr(self, 'model_name', 'qwen3.5:35b')
+        self.initial_model = self.model_name
         self.error_count = 0
         self.max_errors_before_downgrade = 3
         self.model_fleet = [
@@ -423,6 +424,65 @@ group_zscore(multiply(rank(volume), rank(fnd6_newqv1300_spceq)), subindustry)
         
         logger.info(f"Successfully downgraded to {new_model}")
 
+    def heal_high_turnover_alpha(self, expression: str, feedback_context: str = "") -> List[str]:
+        """Use LLM to structurally mutate a high-turnover alpha (Turnover Healer) with optional feedback."""
+        feedback_str = ""
+        if feedback_context:
+            feedback_str = f"\n[CRITICAL FEEDBACK FROM PREVIOUS ATTEMPT]:\n{feedback_context}\nPlease DO NOT repeat the failed approach. Try a completely different mutation option.\n"
+            
+        prompt = f"""
+This FASTEXPR alpha has excellent predictive power (Sharpe > 1.2) but trading turnover is TOO HIGH (Turnover > 0.7).
+Original Expression: {expression}
+{feedback_str}
+Please apply ONE of the following STRUCTURAL mutations to reduce turnover naturally, without destroying the core logic. 
+Return exactly 3 different mutated versions.
+DO NOT use 'decay' or 'neutralization' strings. ONLY modify the formula.
+DO NOT use 'ts_step' as it is an invalid operator on this platform.
+
+Mutation Options:
+1. Discretization (階梯化): Apply `round(... * 5) / 5` or `round(... * 10) / 10` to the outermost rank or zscore to discretize the continuous signal into buckets.
+2. Boolean Masking (條件截断): Multiply the entire expression by a strict threshold mask, e.g., `* (abs(...) > 0.8)` or `* (ts_rank(volume, 20) > 0.5)` to force the signal to exactly 0 when the condition is not met.
+3. Slow Anchor (慢变量定锚): Multiply the expression by the `sign()` of a very slow-moving fundamental or price trend, e.g., `* sign(ts_mean(returns, 120))`.
+4. Delay relative difference: Replace point-to-point difference with difference against a moving average, e.g., `x - ts_mean(x, 10)` instead of `ts_delta`.
+
+Output format:
+Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanations, NO quotes.
+"""
+        logger.info(f"Sending expression to Turnover Healer: {expression}")
+        try:
+            payload = {
+                "model": self.model_name,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.5,
+                    "num_ctx": 4096
+                }
+            }
+            # The ollama endpoint is typically <ollama_url>/api/generate
+            url = f"{self.ollama_url.rstrip('/')}/api/generate"
+            response = requests.post(url, json=payload, timeout=180)
+            if response.status_code == 200:
+                raw_text = response.json().get("response", "")
+                lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+                
+                # Basic cleanup
+                healed_exprs = []
+                for line in lines:
+                    line = re.sub(r'^[\d\.\-\* ]+', '', line).strip()
+                    line = line.replace('`', '').strip()
+                    if line and '(' in line and line != expression:
+                        healed_exprs.append(line)
+                
+                logger.info(f"Turnover Healer returned {len(healed_exprs)} mutations.")
+                return healed_exprs[:3]
+            else:
+                logger.warning(f"Turnover Healer failed with status {response.status_code}")
+                return []
+        except Exception as e:
+            logger.error(f"Error in Turnover Healer: {e}")
+            return []
+
     def test_alpha_batch(self, alphas: List[str]) -> None:
         """Submit a batch of alphas for testing with monitoring, respecting concurrent limits."""
         logger.info(f"Starting batch test of {len(alphas)} alphas")
@@ -658,8 +718,9 @@ group_zscore(multiply(rank(volume), rank(fnd6_newqv1300_spceq)), subindustry)
             return {"status": "error", "message": str(e)}
 
     def log_hopeful_alpha(self, expression: str, alpha_data: Dict) -> None:
-        from .alpha_store import save_alpha
-        save_alpha(expression, alpha_data, source="generator")
+        from .alpha_db import get_alpha_db
+        db = get_alpha_db()
+        db.save_alpha(expression, alpha_data, source="generator")
 
         is_data = alpha_data.get("is", {})
         fitness = is_data.get("fitness")

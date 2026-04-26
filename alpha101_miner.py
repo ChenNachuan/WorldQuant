@@ -17,7 +17,7 @@ from typing import List, Dict, Tuple, Optional
 sys.path.insert(0, ".")
 
 from core.alpha_generator_ollama import AlphaGenerator
-from core.alpha_store import save_alpha
+from core.alpha_db import get_alpha_db
 from core.region_config import get_region_config
 from core.log_manager import setup_logger
 
@@ -317,8 +317,9 @@ def main():
 
                 logger.info(f"  Result: fitness={fitness}, sharpe={sharpe}, turnover={turnover}")
 
-                # Save to alpha store
-                save_alpha(expr, alpha_data, source="alpha101")
+                # Save to SQLite
+                db = get_alpha_db()
+                db.save_alpha(expr, alpha_data, source="alpha101")
 
                 success = (
                     fitness is not None and fitness >= 1.0
@@ -370,7 +371,8 @@ def main():
                     is_data = alpha_data.get("is", {})
                     fitness = is_data.get("fitness")
                     sharpe = is_data.get("sharpe")
-                    save_alpha(expr, alpha_data, source="alpha101_flipped")
+                    db = get_alpha_db()
+                    db.save_alpha(expr, alpha_data, source="alpha101_flipped")
                     logger.info(f"  Flipped result: fitness={fitness}, sharpe={sharpe}")
                     if fitness is not None and fitness >= 1.0 and sharpe is not None and sharpe >= 1.25:
                         successful.append((expr, fitness, sharpe))

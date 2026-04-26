@@ -17,7 +17,7 @@ from typing import List, Dict, Optional
 
 sys.path.insert(0, ".")
 
-from core.alpha_store import save_alpha
+from core.alpha_db import get_alpha_db
 from core.log_manager import setup_logger
 
 import requests
@@ -308,7 +308,8 @@ def main():
 
                 logger.info(f"  [{label}] Result: fitness={fitness}, sharpe={sharpe}, turnover={turnover}")
 
-                save_alpha(tc_formula, alpha_data, source="alpha50_csv")
+                db = get_alpha_db()
+                db.save_alpha(tc_formula, alpha_data, source="alpha50_csv")
 
                 success = (
                     fitness is not None and fitness >= 1.0
@@ -344,7 +345,8 @@ def main():
                             flip_fitness = flip_is.get("fitness")
                             flip_sharpe = flip_is.get("sharpe")
                             logger.info(f"  💡 Flipped result: fitness={flip_fitness}, sharpe={flip_sharpe}")
-                            save_alpha(flipped, flip_data, source="alpha50_flipped")
+                            db = get_alpha_db()
+                            db.save_alpha(flipped, flip_data, source="alpha50_flipped")
                             if flip_fitness and flip_fitness >= 1.0 and flip_sharpe and flip_sharpe >= 1.25:
                                 successful.append((flipped, tc_settings, flip_fitness, flip_sharpe, "FLIPPED"))
                                 logger.info(f"  ✅ FLIPPED SUCCESS!")

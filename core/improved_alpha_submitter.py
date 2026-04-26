@@ -50,8 +50,9 @@ class ImprovedAlphaSubmitter:
                     raise
 
     def check_hopeful_alphas_count(self, min_count: int = 50) -> bool:
-        from .alpha_store import count_alphas
-        count = count_alphas()
+        from .alpha_db import get_alpha_db
+        db = get_alpha_db()
+        count = db.count_alphas()
         logger.info(f"Found {count} hopeful alphas in alpha/ directory")
         if count >= min_count:
             logger.info(f"Sufficient hopeful alphas ({count} >= {min_count}), proceeding with submission")
@@ -61,10 +62,11 @@ class ImprovedAlphaSubmitter:
             return False
 
     def load_hopeful_alphas(self) -> List[Dict]:
-        from .alpha_store import load_all_alphas
+        from .alpha_db import get_alpha_db
         try:
-            alphas = load_all_alphas()
-            logger.info(f"Loaded {len(alphas)} hopeful alphas from alpha/ directory")
+            db = get_alpha_db()
+            alphas = db.get_all_alphas()
+            logger.info(f"Loaded {len(alphas)} hopeful alphas from SQLite")
             return alphas
         except Exception as e:
             logger.error(f"Error loading hopeful alphas: {str(e)}")
@@ -385,12 +387,8 @@ class ImprovedAlphaSubmitter:
             self.cleanup_hopeful_alphas()
 
     def cleanup_hopeful_alphas(self):
-        from .alpha_store import clear_alphas
-        try:
-            clear_alphas()
-            logger.info("Cleared alpha/ directory after successful submission")
-        except Exception as e:
-            logger.error(f"Error cleaning up alpha store: {str(e)}")
+        # We don't delete from SQLite, but we could mark them as submitted if needed.
+        logger.info("Alpha cleanup requested. No-op for SQLite (data preserved).")
 
     def mark_alpha_green(self, alpha_id: str) -> bool:
         url = f"https://api.worldquantbrain.com/alphas/{alpha_id}"
