@@ -31,7 +31,7 @@ class AlphaDB:
     def _get_conn(self) -> sqlite3.Connection:
         """Get a thread-local connection."""
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self.db_path, timeout=30)
+            self._local.conn = sqlite3.connect(self.db_path, timeout=60.0)
             self._local.conn.row_factory = sqlite3.Row
             self._local.conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn.execute("PRAGMA synchronous=NORMAL")
@@ -113,8 +113,11 @@ class AlphaDB:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_alpha_created ON alphas(created_at)"
             )
+            # Drop old index if it exists
+            cur.execute("DROP INDEX IF EXISTS idx_alpha_expr")
+            # Create new composite index
             cur.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alpha_expr ON alphas(expression, region)"
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alpha_expr_settings ON alphas(expression, region, universe, neutralization)"
             )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_error_type ON errors(error_type)"
@@ -146,7 +149,7 @@ class AlphaDB:
                     source, region, universe, delay, decay,
                     neutralization, truncation, status, checks, raw_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(expression, region) DO UPDATE SET
+                ON CONFLICT(expression, region, universe, neutralization) DO UPDATE SET
                     fitness=excluded.fitness,
                     sharpe=excluded.sharpe,
                     turnover=excluded.turnover,
@@ -288,13 +291,19 @@ class AlphaDB:
                 cur.execute("SELECT COUNT(*) FROM alphas")
             return cur.fetchone()[0]
 
-    def expression_exists(self, expression: str, region: str = "USA") -> bool:
-        """Check if an expression has already been tested."""
+    def expression_exists(self, expression: str, region: str = "USA", universe: str = None, neutralization: str = None) -> bool:
+        """Check if an expression has already been tested with specific settings."""
         with self._cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM alphas WHERE expression = ? AND region = ? LIMIT 1",
-                (expression, region),
-            )
+            query = "SELECT 1 FROM alphas WHERE expression = ? AND region = ?"
+            params = [expression, region]
+            if universe:
+                query += " AND universe = ?"
+                params.append(universe)
+            if neutralization:
+                query += " AND neutralization = ?"
+                params.append(neutralization)
+            query += " LIMIT 1"
+            cur.execute(query, tuple(params))
             return cur.fetchone() is not None
 
     # ── Analytics / Retrospect ───────────────────────────────────────

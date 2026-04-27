@@ -57,17 +57,18 @@ def fix_session_proxy(sess: requests.Session) -> None:
     except ImportError:
         logger.warning("certifi not installed, using default SSL certificates")
 
-    sess.mount('https://', requests.adapters.HTTPAdapter(
-        max_retries=requests.adapters.Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[502, 503, 504],
-        )
-    ))
-    sess.mount('http://', requests.adapters.HTTPAdapter(
-        max_retries=requests.adapters.Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[502, 503, 504],
-        )
-    ))
+    # Robust retry strategy (borrowed from forum Super Alpha framework)
+    # Auto-retries on 429 (rate limit), 500, 502, 503, 504
+    retry_strategy = requests.adapters.Retry(
+        total=7,
+        backoff_factor=2,  # exponential: 2s, 4s, 8s, 16s, 32s, 64s, 128s
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PATCH"],
+    )
+    adapter = requests.adapters.HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=20,
+        pool_maxsize=20,
+    )
+    sess.mount('https://', adapter)
+    sess.mount('http://', adapter)

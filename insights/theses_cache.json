@@ -1,0 +1,21 @@
+[
+  {
+    "title": "Intraday Volatility and Volume Signal",
+    "hypothesis": "The alpha hypothesis suggests that stocks experiencing a high intraday price range relative to their closing price, coupled with significant volume compared to the average daily volume over the past 20 days, and showing negative recent returns are likely to continue their downward trend. This signal is hypothesized to be effective in capturing mean reversion strategies where liquidity might be an issue.",
+    "tags": [
+      "momentum",
+      "reversal",
+      "volume"
+    ],
+    "suggested_fields": [
+      "intraday_range",
+      "volume",
+      "recent_returns"
+    ],
+    "suggested_ops": [
+      ">2.0",
+      "< 0"
+    ],
+    "source_file": "insights/sample_insight_1.md"
+  }
+]

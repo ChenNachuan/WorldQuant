@@ -4,7 +4,7 @@ import json
 import os
 from time import sleep
 from requests.auth import HTTPBasicAuth
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import time
 import re
 from queue import Queue
@@ -98,9 +98,89 @@ class AlphaGenerator:
         self.template_similarity = TemplateSimilarity()
         self.expression_compiler = ExpressionCompiler()
         
+        # Semantic Metadata (AlphaSpire inspiration)
+        self.semantic_map = {
+            "operators": {"time_series": [], "cross_sectional": [], "arithmetic": [], "logical": []},
+            "fields": {"price": [], "volume": [], "fundamental": [], "sentiment": [], "returns": []}
+        }
+        self.current_prompt_context = "" # Track current prompt for DPO
+        
         self._cached_operators: List[Dict] = []
         self._cached_fields: List[Dict] = []
         self._initialized = False
+
+    def get_raw_completion(self, prompt: str) -> str:
+        """Sends a raw prompt to the LLM for hypothesis extraction or other reasoning tasks."""
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.3}
+        }
+        try:
+            resp = self.sess.post(f"{self.ollama_url}/api/generate", json=payload, timeout=120)
+            if resp.status_code == 200:
+                return resp.json().get("response", "")
+        except Exception as e:
+            logger.error(f"Ollama raw completion error: {e}")
+        return ""
+
+    def _classify_metadata(self):
+        """Classifies operators and fields into semantic groups."""
+        # Operators
+        ops = self.operator_fetcher.fetch_operators()
+        for op in ops:
+            name = op.get("name", "").lower()
+            if name.startswith("ts_"):
+                self.semantic_map["operators"]["time_series"].append(name)
+            elif name.startswith("group_") or name.startswith("vec_"):
+                self.semantic_map["operators"]["cross_sectional"].append(name)
+            elif any(x in name for x in ["add", "sub", "mul", "div", "abs", "log"]):
+                self.semantic_map["operators"]["arithmetic"].append(name)
+            else:
+                self.semantic_map["operators"]["logical"].append(name)
+
+        # Fields
+        fields = self.data_field_fetcher.fetch_data_fields(
+            region=self.region_config.region,
+            universe=self.region_config.universe,
+            delay=self.region_config.delay
+        )
+        for f in fields:
+            f_id = f.get("id", "").lower()
+            desc = f.get("description", "").lower()
+            if any(x in f_id for x in ["close", "open", "high", "low", "vwap"]):
+                self.semantic_map["fields"]["price"].append(f_id)
+            elif any(x in f_id for x in ["volume", "adv", "turnover"]):
+                self.semantic_map["fields"]["volume"].append(f_id)
+            elif any(x in f_id for x in ["fnd", "cap", "debt", "equity", "cash", "eps"]):
+                self.semantic_map["fields"]["fundamental"].append(f_id)
+            elif "sentiment" in desc or "news" in desc or "social" in desc:
+                self.semantic_map["fields"]["sentiment"].append(f_id)
+            elif "ret" in f_id or "return" in desc:
+                self.semantic_map["fields"]["returns"].append(f_id)
+
+    def initialize(self):
+        logger.info("Loading cached operators and data fields...")
+        # 1. Fetch data
+        ops = self.get_operators()
+        fields = self.get_data_fields()
+        
+        # 2. Run semantic classification
+        self._classify_metadata()
+        logger.info(f"  Semantic groups populated. Fields: { {k: len(v) for k,v in self.semantic_map['fields'].items()} }")
+        
+        # 3. Setup validators with flattened IDs
+        op_names = set(op.get("name", "") for op in ops if op.get("name"))
+        field_ids = set(f.get("id", "") for f in fields if f.get("id"))
+        
+        self.smart_search.update_fields(fields)
+        self.ast_validator = ASTValidator(
+            known_operators=op_names,
+            known_fields=field_ids,
+            strict=True
+        )
+        self._initialized = True
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -205,7 +285,7 @@ class AlphaGenerator:
             
             is_valid, errors = self.ast_validator.validate(idea)
             if not is_valid:
-                logger.debug(f"AST rejected: {idea[:60]} | errors: {errors}")
+                logger.warning(f"AST rejected: {idea[:60]} | errors: {errors}")
                 continue
             
             cleaned_ideas.append(idea)
@@ -230,155 +310,148 @@ class AlphaGenerator:
                 'description': op['description']
             })
 
-        try:
-            # Clear tested expressions if we hit token limit in previous attempt
-            if hasattr(self, '_hit_token_limit'):
-                logger.info("Clearing tested expressions due to previous token limit")
-                self.results = []
-                delattr(self, '_hit_token_limit')
-
-            # Randomly sample ~35% of operators from each category (tighter, higher-precision set)
-            sampled_operators = {}
-            for category, ops in operator_by_category.items():
-                sample_size = max(1, int(len(ops) * 0.35))  # At least 1 operator per category
-                sampled_operators[category] = random.sample(ops, sample_size)
-
-            print("Preparing prompt for FinGPT...")
-            # Format operators with their types, definitions, and descriptions
-            def format_operators(ops):
-                formatted = []
-                for op in ops:
-                    formatted.append(f"{op['name']} ({op['type']})\n"
-                                   f"  Definition: {op['definition']}\n"
-                                   f"  Description: {op['description']}")
-                return formatted
-
-            sampled_fields = random.sample(data_fields, min(30, len(data_fields)))
-            field_ids_for_prompt = [field['id'] for field in sampled_fields]
-
-            prompt = f"""You are an elite Quantitative Researcher participating in the WorldQuant IQC. Your task is to generate 5 DIVERSE, HIGH-SHARPE FASTEXPR alpha expressions. Each expression MUST use a DIFFERENT financial logic pattern. Return ONLY the expressions, one per line, with no comments or explanations.
-
-Available Data Fields:
-{field_ids_for_prompt}
-
-Available Operators by Category:
-Time Series:
-{chr(10).join(format_operators(sampled_operators.get('Time Series', [])))}
-Cross Sectional:
-{chr(10).join(format_operators(sampled_operators.get('Cross Sectional', [])))}
-Arithmetic:
-{chr(10).join(format_operators(sampled_operators.get('Arithmetic', [])))}
-Logical:
-{chr(10).join(format_operators(sampled_operators.get('Logical', [])))}
-Vector:
-{chr(10).join(format_operators(sampled_operators.get('Vector', [])))}
-Transformational:
-{chr(10).join(format_operators(sampled_operators.get('Transformational', [])))}
-Group:
-{chr(10).join(format_operators(sampled_operators.get('Group', [])))}
-
-CRITICAL RULES (Hard Constraints):
-1. Output ONLY single-line FASTEXPR expressions. No variables, no comments, no semicolons.
-2. Use ONLY the provided data fields and operators. Do NOT invent fields.
-3. Time windows: only use {{5, 20, 60, 120, 180, 252}}.
-4. Max nesting depth: 4 levels. Keep it elegant.
-5. The OUTERMOST layer of EVERY expression MUST be either `rank()`, `group_neutralize()`, or `-rank()`. This is mandatory for cross-sectional stability.
-6. `group_neutralize` second arg must be exactly one of: sector, industry, subindustry, market (no quotes).
-7. Do NOT use categorical fields as inputs to time-series (ts_) operators.
-
-DIVERSITY REQUIREMENTS (Encode these 5 specific Financial Themes):
-Generate exactly 5 expressions, each strictly following one of these themes:
-- Theme 1 (Trend Following): group_neutralize(zscore(ts_av_diff(FIELD, window)), sector) -> Capture the momentum or mean-reversion of a fundamental/model field.
-- Theme 2 (Cross-Sectional Anomaly): rank(ts_corr(FIELD_1, FIELD_2, window)) -> Measure the rolling correlation between a price/volume field and a fundamental field.
-- Theme 3 (Volatility Adjusted): group_neutralize(divide(ts_delta(FIELD, window), ts_std_dev(FIELD, window)), industry) -> Signal scaled by its own historical volatility.
-- Theme 4 (Relative Strength): ts_rank(subtract(FIELD, ts_mean(FIELD, window)), window) -> How strong is the current value relative to its historical mean.
-- Theme 5 (Interaction/Composite): group_zscore(multiply(rank(FIELD_1), rank(FIELD_2)), subindustry) -> Combining two orthogonal fields (e.g., value and momentum).
-
-Example Formats (DO NOT COPY THESE EXACTLY, learn the structure):
-group_neutralize(zscore(ts_av_diff(fnd6_newqv1300_wcapq, 20)), sector)
-rank(ts_corr(volume, close, 60))
-group_neutralize(divide(ts_delta(mdl177_2_earningmomentumfactor400_sue, 20), ts_std_dev(mdl177_2_earningmomentumfactor400_sue, 60)), industry)
--rank(ts_rank(subtract(returns, ts_mean(returns, 20)), 120))
-group_zscore(multiply(rank(volume), rank(fnd6_newqv1300_spceq)), subindustry)
+    def generate_alphas(self, data_fields: List[Dict], operators: List[Dict], hypothesis_context: str = "") -> List[str]:
+        """Generates diverse alpha expressions using Expert Routing (Mixture of Experts).
+        Each batch focuses on a specific financial theme to ensure deep logic.
+        """
+        # Define Expert Themes (Mixture of Experts)
+        EXPERT_THEMES = {
+            "momentum_specialist": """
+ROLE: Senior Momentum Strategist
+FOCUS: Trend Following and Volume Confirmation.
+LOGIC: Capture the persistence of price and fundamental trends. 
+METRICS: Sharpe > 1.5, Fitness > 1.0, Turnover: 0.1 - 0.5.
+HINTS: Use `ts_av_diff` or `ts_delta` to measure change. Combine price momentum with liquidity spikes using `volume` or `adv20`.
+""",
+            "mean_reversion_pro": """
+ROLE: Statistical Arbitrage Expert
+FOCUS: Mean Reversion and Overbought/Oversold Anomaly.
+LOGIC: Identify extreme deviations from historical averages or fundamental anchors.
+METRICS: Sharpe > 1.2, Fitness > 1.0, Turnover: 0.2 - 0.7.
+HINTS: Use `zscore`, `ts_rank`, or `ts_std_dev` to find statistical outliers.
+""",
+            "fundamental_quant": """
+ROLE: Fundamental Factor Researcher
+FOCUS: Quality, Value, and Long-term Growth.
+LOGIC: Mine mispriced assets based on earning quality, asset efficiency, or growth rates.
+METRICS: Sharpe > 1.0, Fitness > 1.0, Turnover: 0.01 - 0.2 (Low Turnover).
+HINTS: Use long windows (60, 120, 252). Construct ratios like `fnd_field_1 / fnd_field_2` before applying operators.
+""",
+            "stat_arb_wizard": """
+ROLE: High-Frequency Correlation Expert
+FOCUS: Cross-Sectional Relationships and Lead-Lag Effects.
+LOGIC: Find rolling correlations between seemingly orthogonal fields.
+METRICS: Sharpe > 1.8, Fitness > 1.2, Turnover: 0.3 - 0.8.
+HINTS: Extensively use `ts_corr(rank(FIELD_1), rank(FIELD_2), window)` or `ts_covariance`.
 """
-            # Prepare Ollama API request
-            model_name = getattr(self, 'model_name', self.model_fleet[self.current_model_index])
-            ollama_data = {
-                'model': model_name,    
-                'prompt': prompt,
-                'stream': False,
+        }
+
+        # Select a random expert for this batch
+        theme_id, theme_content = random.choice(list(EXPERT_THEMES.items()))
+        logger.info(f"Expert Routing activated: {theme_id.upper()}")
+
+        # Semantic Map
+        semantic_fields = self.semantic_map["fields"]
+        semantic_ops = self.semantic_map["operators"]
+
+        # Prepare field and op strings
+        price_fields = ', '.join(semantic_fields['price'][:12])
+        vol_fields = ', '.join(semantic_fields['volume'][:12])
+        fnd_fields = ', '.join(semantic_fields['fundamental'][:15])
+        
+        # Ensure 'returns' is explicitly in the ret_fields even if not in the top 10
+        ret_set = set(semantic_fields['returns'][:10])
+        if "returns" in semantic_fields['returns']:
+            ret_set.add("returns")
+        ret_fields = ', '.join(list(ret_set))
+        
+        op_context = []
+        for cat, ops in semantic_ops.items():
+            if ops:
+                op_context.append(f"{cat.upper()}: {', '.join(ops[:15])}")
+
+        insights_section = ""
+        if hypothesis_context:
+            insights_section = f"""
+EXPERT INSIGHTS TO INCORPORATE:
+{hypothesis_context}
+"""
+
+        prompt = f"""You are an elite WorldQuant Researcher.
+{theme_content}
+
+{insights_section}
+
+SEMANTIC DATA FIELDS:
+- PRICE: {price_fields}
+- VOLUME: {vol_fields}
+- FUNDAMENTAL: {fnd_fields}
+- RETURNS: {ret_fields}
+
+AVAILABLE OPERATORS:
+{chr(10).join(op_context)}
+
+CRITICAL RULES:
+1. Output ONLY single-line FASTEXPR expressions. One per line. No explanations.
+2. Outermost layer MUST be `rank()` or `group_neutralize(..., sector|industry|subindustry)`.
+3. Use ONLY provided fields. NEVER use `ret` - use `returns` instead.
+4. Time windows: {{5, 10, 20, 60, 120, 252}}. Max nesting: 4 levels.
+5. DOMAIN SAFETY: `log()` or `sqrt()` on raw `returns` or negative fundamental fields WILL FAIL. Use `abs()` or `ts_rank()` first if needed.
+6. SYNTAX SAFETY: 
+   - NEVER use Python indexing like `volume[1]`. Use `delay(volume, 1)` or `ts_delta(volume, 1)`.
+   - Operators like `ts_corr`, `ts_std_dev`, `ts_mean`, `ts_scale` ALWAYS require a window parameter, e.g., `ts_mean(x, 20)`.
+
+BAD EXAMPLES (DO NOT DO THIS):
+- `rank(volume[1])` -> WRONG indexing
+- `ts_std_dev(close)` -> MISSING window
+- `log(returns)` -> NEGATIVE domain error
+
+Generate 3-5 alpha expressions following the {theme_id} logic.
+"""
+        # Track prompt for DPO training
+        self.current_prompt_context = prompt
+
+        ollama_data = {
+            'model': self.model_name,    
+            'prompt': prompt,
+            'stream': False,
+            'options': {
                 'temperature': 0.7,
-                'top_p': 0.9,
                 'num_predict': 1000
             }
+        }
 
-            print("Sending request to Ollama API...")
-            try:
-                response = requests.post(
-                    f'{self.ollama_url}/api/generate',
-                    json=ollama_data,
-                    timeout=600  # 10 minutes timeout for large models
-                )
+        try:
+            response = self.sess.post(f'{self.ollama_url}/api/generate', json=ollama_data, timeout=300)
+            if response.status_code != 200:
+                raise Exception(f"Ollama API request failed: {response.text}")
 
-                logger.info(f"Ollama API response status: {response.status_code}")
-                logger.info(f"Ollama API response: {response.text[:500]}...")  # Print first 500 chars
-
-                if response.status_code == 500:
-                    logger.error(f"Ollama API returned 500 error: {response.text}")
-                    # Trigger model downgrade for 500 errors
-                    self._handle_ollama_error("500_error")
-                    return []
-                elif response.status_code != 200:
-                    raise Exception(f"Ollama API request failed: {response.text}")
-                    
-            except requests.exceptions.Timeout:
-                logger.error("Ollama API request timed out (600s)")
-                # Trigger model downgrade for timeouts
-                self._handle_ollama_error("timeout")
-                return []
-            except requests.exceptions.ConnectionError as e:
-                if "Read timed out" in str(e):
-                    logger.error("Ollama API read timeout")
-                    # Trigger model downgrade for read timeouts
-                    self._handle_ollama_error("read_timeout")
-                    return []
-                else:
-                    raise e
-
-            response_data = response.json()
-            print(f"Ollama API response JSON keys: {list(response_data.keys())}")
-
-            if 'response' not in response_data:
-                raise Exception(f"Unexpected Ollama API response format: {response_data}")
-
-            print("Processing Ollama API response...")
-            content = response_data['response']
+            content = response.json()['response']
             
-            # Extract pure alpha expressions by:
-            # 1. Remove markdown backticks
-            # 2. Remove numbering (e.g., "1. ", "2. ")
-            # 3. Skip comments
+            # Clean and validate ideas
             alpha_ideas = []
             for line in content.split('\n'):
                 line = line.strip()
-                if not line or line.startswith('#') or line.startswith('*'):
-                    continue
-                # Remove numbering and backticks
+                if not line or line.startswith('#') or line.startswith('`'): continue
+                
+                # Strip markdown, numbering, and themes
                 line = line.replace('`', '')
-                if '. ' in line:
-                    line = line.split('. ', 1)[1]
-                if line and not line.startswith('Comment:'):
+                line = re.sub(r'^\d+[\.\)]\s*', '', line) # 1. or 1)
+                line = re.sub(r'^Theme\s*\d+[:\- ]*', '', line, flags=re.IGNORECASE)
+                
+                # Heuristic: must have at least one parenthesis to be an expression
+                if '(' in line and ')' in line:
                     alpha_ideas.append(line)
             
-            print(f"Generated {len(alpha_ideas)} alpha ideas")
-            for i, alpha in enumerate(alpha_ideas, 1):
-                print(f"Alpha {i}: {alpha}")
-            
-            # Clean and validate ideas
             cleaned_ideas = self.clean_alpha_ideas(alpha_ideas)
-            logger.info(f"Found {len(cleaned_ideas)} valid alpha expressions")
-            
+            if not cleaned_ideas:
+                logger.warning(f"[{theme_id}] No valid expressions found. Raw LLM content:\n{content[:500]}...")
+            logger.info(f"[{theme_id}] Generated {len(cleaned_ideas)} valid expressions.")
             return cleaned_ideas
+
+        except Exception as e:
+            logger.error(f"Error in {theme_id} generation: {str(e)}")
+            return []
 
         except Exception as e:
             if "token limit" in str(e).lower():
@@ -655,18 +728,126 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
         
         return successful
 
-    def test_alpha(self, alpha: str) -> Dict:
-        result = self._test_alpha_impl(alpha)
+    def test_alpha(self, alpha: str, custom_settings: Optional[Dict] = None) -> Dict:
+        result = self._test_alpha_impl(alpha, custom_settings)
         if result.get("status") == "error" and "SIMULATION_LIMIT_EXCEEDED" in result.get("message", ""):
+            # We don't queue custom settings in retry_queue currently, just the expression
             self.retry_queue.add(alpha)
             return {"status": "queued", "message": "Added to retry queue"}
         return result
 
-    def _test_alpha_impl(self, alpha_expression: str) -> Dict:
+    def test_alphas_batch(self, items: List[Tuple[str, Optional[Dict]]]) -> List[Dict]:
+        """Test multiple alphas simultaneously using native API batch submission."""
+        if not items:
+            return []
+            
+        sim_data_list = []
+        for expr, custom_settings in items:
+            settings = self.region_config.to_simulation_settings()
+            if custom_settings:
+                settings.update(custom_settings)
+            
+            sim_data_list.append({
+                'type': 'REGULAR',
+                'settings': settings,
+                'regular': expr
+            })
+
+        try:
+            logger.info(f"Submitting {len(sim_data_list)} alphas as a single native batch...")
+            resp = self.sess.post('https://api.worldquantbrain.com/simulations', json=sim_data_list, timeout=60)
+            
+            if resp.status_code == 403:
+                logger.warning("Native Batch API returned 403 (Forbidden). Falling back to individual submissions...")
+                results = []
+                for i, (expr, settings) in enumerate(items):
+                    logger.info(f"Fallback Submission {i+1}/{len(items)}: {expr[:50]}...")
+                    sim_res = self._test_alpha_impl(expr, settings)
+                    if sim_res.get("status") == "success":
+                        final_res = self.wait_for_simulation(sim_res["result"]["progress_url"], expr)
+                        results.append(final_res)
+                    else:
+                        results.append(sim_res)
+                    if i < len(items) - 1:
+                        time.sleep(2) # Prevent rapid fire individual submissions
+                return results
+                
+            resp.raise_for_status()
+            
+            progress_url = resp.headers.get('Location')
+            if not progress_url:
+                logger.error("Batch submission failed: Missing Location header.")
+                return [{"status": "error", "message": "Missing Location header", "expr": item[0]} for item in items]
+                
+            logger.info(f"Parent batch URL received. Polling for completion...")
+            
+            # Poll the parent URL
+            while True:
+                sim_progress = self.sess.get(progress_url, timeout=60)
+                if sim_progress.status_code == 429:
+                    time.sleep(5)
+                    continue
+                    
+                data = sim_progress.json()
+                status = data.get("status")
+                
+                if status == "COMPLETE":
+                    break
+                elif status == "ERROR":
+                    logger.error(f"Batch simulation failed: {data}")
+                    return [{"status": "error", "message": str(data), "expr": item[0]} for item in items]
+                    
+                retry_after = sim_progress.headers.get("Retry-After", 2)
+                time.sleep(float(retry_after))
+                
+            # Once parent is complete, fetch all children
+            children_ids = data.get("children", [])
+            logger.info(f"Batch parent complete. Extracting {len(children_ids)} child results...")
+            
+            # Use a small thread pool to fetch child reports quickly
+            results = []
+            
+            def fetch_child(child_id):
+                child_url = f"https://api.worldquantbrain.com/simulations/{child_id}"
+                c_resp = self.sess.get(child_url, timeout=60)
+                c_data = c_resp.json()
+                
+                c_status = c_data.get("status")
+                # Ensure we have the expression to map it back, it is usually inside c_data['regular']
+                expr = c_data.get("regular", "")
+                
+                if c_status == "ERROR":
+                    return {"status": "error", "message": c_data.get("error", "Unknown error"), "expr": expr}
+                    
+                alpha_id = c_data.get("alpha")
+                if alpha_id:
+                    a_resp = self.sess.get(f'https://api.worldquantbrain.com/alphas/{alpha_id}', timeout=60)
+                    if a_resp.status_code == 200:
+                        a_data = a_resp.json()
+                        return {"status": "COMPLETE", "alpha": alpha_id, "alpha_data": a_data, "expr": expr}
+                return {"status": "error", "message": "Could not fetch alpha data", "expr": expr}
+
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = [pool.submit(fetch_child, cid) for cid in children_ids]
+                for f in futures:
+                    results.append(f.result())
+                    
+            return results
+            
+        except Exception as e:
+            logger.error(f"Batch submission error: {str(e)}")
+            return [{"status": "error", "message": str(e), "expr": item[0]} for item in items]
+
+    def _test_alpha_impl(self, alpha_expression: str, custom_settings: Optional[Dict] = None) -> Dict:
         def submit_simulation():
+            settings = self.region_config.to_simulation_settings()
+            if custom_settings:
+                settings.update(custom_settings)
+                
             simulation_data = {
                 'type': 'REGULAR',
-                'settings': self.region_config.to_simulation_settings(),
+                'settings': settings,
                 'regular': alpha_expression
             }
             return self.sess.post('https://api.worldquantbrain.com/simulations', json=simulation_data, timeout=(30, 120))
@@ -709,13 +890,44 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
                 "status": "success", 
                 "result": {
                     "id": f"{time.time()}_{random.random()}",
-                    "progress_url": sim_progress_url
-                }
+                    "progress_url": sim_progress_url,
+                    "alpha": alpha_expression
+                },
+                "expr": alpha_expression
             }
             
         except Exception as e:
             logger.error(f"Error testing alpha {alpha_expression}: {str(e)}")
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": str(e), "expr": alpha_expression}
+
+    def wait_for_simulation(self, progress_url: str, expr: str) -> Dict:
+        """Wait for a single simulation to complete and fetch its alpha data."""
+        logger.info(f"Polling individual simulation for: {expr[:50]}...")
+        while True:
+            try:
+                resp = self.sess.get(progress_url, timeout=60)
+                if resp.status_code == 429:
+                    time.sleep(5)
+                    continue
+                
+                data = resp.json()
+                status = data.get("status")
+                logger.info(f"  Status: {status}")
+                
+                if status == "COMPLETE":
+                    alpha_id = data.get("alpha")
+                    if alpha_id:
+                        a_resp = self.sess.get(f'https://api.worldquantbrain.com/alphas/{alpha_id}', timeout=60)
+                        if a_resp.status_code == 200:
+                            return {"status": "COMPLETE", "alpha": alpha_id, "alpha_data": a_resp.json(), "expr": expr}
+                    return {"status": "error", "message": "No alpha ID after completion", "expr": expr}
+                elif status == "ERROR":
+                    return {"status": "error", "message": data.get("error", "Sim failed"), "expr": expr}
+                
+                retry_after = float(resp.headers.get("Retry-After", 2))
+                time.sleep(retry_after)
+            except Exception as e:
+                return {"status": "error", "message": str(e), "expr": expr}
 
     def log_hopeful_alpha(self, expression: str, alpha_data: Dict) -> None:
         from .alpha_db import get_alpha_db

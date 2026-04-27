@@ -161,4 +161,17 @@ class ExpressionCompiler:
             "ts_corr({FIELD}, {FIELD2}, {WINDOW})",
             "rank(divide(ts_mean({FIELD}, {WINDOW}), ts_std_dev({FIELD}, {WINDOW})))",
             "group_neutralize(zscore(subtract(ts_rank({FIELD}, {WINDOW}), ts_rank({FIELD2}, {WINDOW}))), {GROUP})",
+            # Elite Price-Volume Chassis (New)
+            "group_zscore(ts_decay_linear(rank((high - low) / close) + rank(min({FIELD} / adv20, 5)) - rank(returns), {WINDOW}), {GROUP}) * signed_power(group_rank(adv20, {GROUP}), 2)",
+            "group_zscore(ts_decay_linear(ts_corr(ts_rank((high - low) / close, {WINDOW}), ts_rank({FIELD}, {WINDOW}), {WINDOW}), {WINDOW2}), {GROUP}) * signed_power(group_rank(adv20, {GROUP}), 2)",
+            # 捕捉量价背离或基本面与价格的背离
+            "group_neutralize(zscore(ts_rank(ts_corr({FIELD}, {FIELD2}, {WINDOW}), {WINDOW2})), {GROUP})",
+            "rank(divide({FIELD}, {FIELD2}))",
+            # 专门处理高频换手，只在标准差极大时才触发信号，平时信号归零
+            "group_neutralize(if_else(abs(zscore({FIELD})) > 1.5, zscore(ts_av_diff({FIELD}, {WINDOW})), 0), {GROUP})",
+            # 分别处理两种动量（基本面动量和价格动量），并在最后加权融合
+            "group_neutralize(multiply(rank(ts_delta({FIELD}, {WINDOW})), rank(ts_delta({FIELD2}, {WINDOW2}))), {GROUP})",
+            "group_neutralize(zscore(rank(divide({FIELD}, {FIELD2}))), {GROUP})",
+            # 捕捉长期均值回归
+            "group_neutralize(zscore(subtract(ts_mean({FIELD}, {WINDOW}), {FIELD})), {GROUP})",
         ]

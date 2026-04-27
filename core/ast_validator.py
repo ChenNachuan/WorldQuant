@@ -73,6 +73,10 @@ class ASTValidator:
         if expr.startswith("Comment:"):
             errors.append("Is a comment")
 
+        # Illegal character check
+        if re.search(r"[\[\]\{\}\']", expr):
+            errors.append("Contains illegal characters (e.g., [], {}, or quotes)")
+
         paren_balance = 0
         for ch in expr:
             if ch == "(":
@@ -96,6 +100,11 @@ class ASTValidator:
 
         fields_found = self._extract_field_references(expr)
         for field in fields_found:
+            # Strict field check
+            if self.known_fields and field not in self.known_fields:
+                # Some words might be part of syntax like 'sector' etc, handled by extract_field_references
+                errors.append(f"Unknown field: {field}")
+
             if self._is_categorical_field(field):
                 for ts_op in TS_OPERATORS:
                     pattern = ts_op + r"\s*\([^)]*" + re.escape(field)
@@ -104,6 +113,14 @@ class ASTValidator:
                             f"Categorical field '{field}' used in time series operator '{ts_op}'"
                         )
                         break
+        
+        # Domain error check (e.g. log(-returns))
+        if re.search(r"log\s*\(\s*-\s*[a-zA-Z0-9_]+", expr, re.IGNORECASE):
+            errors.append("Invalid math: log() of a negative negation is highly likely to fail")
+        if re.search(r"sqrt\s*\(\s*-\s*[a-zA-Z0-9_]+", expr, re.IGNORECASE):
+            errors.append("Invalid math: sqrt() of a negative negation is highly likely to fail")
+        if re.search(r"log\s*\(\s*[a-zA-Z0-9_]*returns\s*\)", expr, re.IGNORECASE):
+             errors.append("Invalid math: log() of raw returns is unsafe (negative values)")
 
         if "group_neutralize(" in expr or "group_mean(" in expr or "group_zscore(" in expr:
             has_valid_group = bool(re.search(r"(?:sector|industry|subindustry|market)\s*\)", expr))
