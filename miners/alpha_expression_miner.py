@@ -13,25 +13,13 @@ logger = setup_logger(__name__, "miner")
 class AlphaExpressionMiner:
     def __init__(self):
         logger.info("Initializing AlphaExpressionMiner")
-        self.sess = requests.Session()
-        from core.config import fix_session_proxy
-        fix_session_proxy(self.sess)
-        self.setup_auth()
-        
+        from core.api_session import get_session_manager
+        self._api = get_session_manager()
+        self.sess = self._api.session
+
     def setup_auth(self) -> None:
-        from core.config import load_credentials
-        logger.info("Loading credentials from .env")
-        username, password = load_credentials()
-        self.sess.auth = HTTPBasicAuth(username, password)
-        
-        logger.info("Authenticating with WorldQuant Brain...")
-        response = self.sess.post('https://api.worldquantbrain.com/authentication')
-        logger.info(f"Authentication response status: {response.status_code}")
-        
-        if response.status_code != 201:
-            logger.error(f"Authentication failed: {response.text}")
-            raise Exception(f"Authentication failed: {response.text}")
-        logger.info("Authentication successful")
+        self._api.ensure_authenticated()
+        logger.info("Authentication verified via session manager")
 
     def remove_alpha_from_hopeful(self, expression: str) -> bool:
         from core.alpha_db import get_alpha_db

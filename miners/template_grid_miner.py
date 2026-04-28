@@ -17,15 +17,8 @@ logger = setup_logger(__name__, "miner")
 
 
 def auth_session() -> requests.Session:
-    from core.config import load_credentials, fix_session_proxy
-    u, p = load_credentials()
-    s = requests.Session()
-    fix_session_proxy(s)
-    s.auth = HTTPBasicAuth(u, p)
-    r = s.post('https://api.worldquantbrain.com/authentication')
-    if r.status_code != 201:
-        raise RuntimeError(f"Auth failed: {r.text}")
-    return s
+    from core.api_session import get_session_manager
+    return get_session_manager().session
 
 
 def submit_sim(s: requests.Session, expression: str, region_key: str = "USA") -> dict:

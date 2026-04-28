@@ -138,12 +138,8 @@ class AlphaDashboard:
     def get_worldquant_status(self) -> Dict:
         """Check WorldQuant Brain API status."""
         try:
-            from core.config import load_credentials, fix_session_proxy
-            username, password = load_credentials()
-            
-            session = requests.Session()
-            fix_session_proxy(session)
-            session.auth = (username, password)
+            from core.api_session import get_session_manager
+            session = get_session_manager().session
             response = session.post('https://api.worldquantbrain.com/authentication', timeout=10)
             
             if response.status_code == 201:

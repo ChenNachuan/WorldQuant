@@ -87,18 +87,8 @@ def build_simulation_data(formula: str, settings: Dict) -> Dict:
 
 def create_session() -> requests.Session:
     """Create authenticated session."""
-    from core.config import load_credentials, fix_session_proxy
-
-    username, password = load_credentials()
-    sess = requests.Session()
-    fix_session_proxy(sess)
-    sess.auth = HTTPBasicAuth(username, password)
-
-    resp = sess.post("https://api.worldquantbrain.com/authentication", timeout=(15, 30))
-    if resp.status_code != 201:
-        raise Exception(f"Authentication failed: {resp.text}")
-    logger.info("Authentication successful")
-    return sess
+    from core.api_session import get_session_manager
+    return get_session_manager().session
 
 
 def submit_simulation(sess: requests.Session, sim_data: Dict) -> Optional[str]:

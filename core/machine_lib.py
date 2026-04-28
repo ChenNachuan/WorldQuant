@@ -39,16 +39,10 @@ class WorldQuantBrain:
         self.login()
 
     def login(self):
-        from .config import fix_session_proxy
+        from .api_session import create_session
         logger.info("Authenticating with WorldQuant Brain...")
-        self.session = requests.Session()
-        fix_session_proxy(self.session)
-        self.session.auth = (self.username, self.password)
-        response = self.session.post('https://api.worldquantbrain.com/authentication')
-        
-        if response.status_code != 201:
-            raise Exception(f"Authentication failed: {response.text}")
-            
+        mgr = create_session(username=self.username, password=self.password)
+        self.session = mgr.session
         self.session.headers.update({
             'Content-Type': 'application/json',
             'Accept': 'application/json'

@@ -228,28 +228,10 @@ class ModelFleetManager:
             return False
     
     def update_alpha_generator_config(self, model_name: str):
-        """Update the alpha generator configuration to use the new model."""
-        try:
-            # Update the default model in alpha_generator_ollama.py
-            with open('core/alpha_generator_ollama.py', 'r') as f:
-                content = f.read()
-            
-            # Replace the default model
-            content = content.replace(
-                    "default='qwen3.5:35b'",
-                f"default='{model_name}'"
-            )
-            content = content.replace(
-                "getattr(self, 'model_name', 'qwen3.5:35b')",
-                f"getattr(self, 'model_name', '{model_name}')"
-            )
-            
-            with open('core/alpha_generator_ollama.py', 'w') as f:
-                f.write(content)
-            
-            logger.info(f"Updated alpha generator config to use {model_name}")
-        except Exception as e:
-            logger.error(f"Error updating alpha generator config: {e}")
+        """Persist the new default model via config file (no source edit)."""
+        from .config import set_default_model
+        set_default_model(model_name)
+        logger.info(f"Set default model to {model_name} via data/model_config.json")
     
     def get_fleet_status(self) -> Dict:
         """Get the current status of the model fleet."""
@@ -293,45 +275,33 @@ class ModelFleetManager:
 
 class AlphaOrchestrator:
     def __init__(self, ollama_url: str = None):
-        from .config import load_credentials, get_ollama_url, fix_session_proxy
-        self.sess = requests.Session()
-        fix_session_proxy(self.sess)
+        from .config import get_ollama_url
+        from .api_session import get_session_manager
+        self._api = get_session_manager()
+        self.sess = self._api.session
         self.ollama_url = ollama_url or get_ollama_url()
-        self.setup_auth()
         self.last_submission_date = None
         self.submission_log_file = os.path.join("data", "submission_log.json")
         self.load_submission_history()
-        
-        # Concurrency control
+
+        # Concurrency managed by SimulationSlotManager (SQLite-based)
         self.max_concurrent_simulations = 3
-        self.simulation_semaphore = threading.Semaphore(self.max_concurrent_simulations)
         self.running = True
         self.generator_process = None
         self.miner_process = None
-        
+
         # Model fleet management
         self.model_fleet_manager = ModelFleetManager(ollama_url)
         self.vram_monitoring_active = False
         self.vram_monitor_thread = None
-        
+
         # Restart mechanism
         self.restart_interval = 1800  # 30 minutes in seconds
         self.last_restart_time = time.time()
         self.restart_thread = None
-        
+
     def setup_auth(self) -> None:
-        from .config import load_credentials
-        logger.info("Loading credentials from .env")
-        username, password = load_credentials()
-        self.sess.auth = HTTPBasicAuth(username, password)
-        
-        logger.info("Authenticating with WorldQuant Brain...")
-        response = self.sess.post('https://api.worldquantbrain.com/authentication')
-        logger.info(f"Authentication response status: {response.status_code}")
-        
-        if response.status_code != 201:
-            raise Exception(f"Authentication failed: {response.text}")
-        logger.info("Authentication successful")
+        self._api.ensure_authenticated()
 
     def load_submission_history(self):
         """Load submission history to track daily submissions."""
@@ -348,13 +318,9 @@ class AlphaOrchestrator:
             self.last_submission_date = None
 
     def save_submission_history(self):
-        data = {
-            'last_submission_date': self.last_submission_date,
-            'updated_at': datetime.now().isoformat()
-        }
-        os.makedirs(os.path.dirname(self.submission_log_file), exist_ok=True)
-        with open(self.submission_log_file, 'w') as f:
-            json.dump(data, f, indent=2)
+        from .submission_quota import get_submission_quota
+        q = get_submission_quota()
+        self.last_submission_date = q.last_submission_date()
 
     def start_vram_monitoring(self):
         """Start VRAM monitoring in a separate thread."""
@@ -489,15 +455,9 @@ class AlphaOrchestrator:
         return self.model_fleet_manager.trigger_application_reset()
 
     def can_submit_today(self) -> bool:
-        """Check if we can submit alphas today (only once per day)."""
-        today = datetime.now().date().isoformat()
-        
-        if self.last_submission_date == today:
-            logger.info(f"Already submitted today ({today}). Skipping submission.")
-            return False
-        
-        logger.info(f"Can submit today. Last submission was: {self.last_submission_date}")
-        return True
+        """Check if we can submit alphas today (delegates to SubmissionQuota)."""
+        from .submission_quota import get_submission_quota
+        return get_submission_quota().can_submit()
 
     def run_alpha_expression_miner(self):
         from .alpha_db import get_alpha_db

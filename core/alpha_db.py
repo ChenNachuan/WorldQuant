@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from contextlib import contextmanager
 
+from .alpha_lifecycle import AlphaState, validate_transition
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join("data", "alphas.db")
@@ -81,7 +83,13 @@ class AlphaDB:
             try:
                 cur.execute("ALTER TABLE alphas ADD COLUMN raw_json TEXT")
             except sqlite3.OperationalError:
-                pass # Column already exists
+                pass  # Column already exists
+
+            # Upgrade: add lifecycle_state column
+            try:
+                cur.execute("ALTER TABLE alphas ADD COLUMN lifecycle_state TEXT DEFAULT 'simulated'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
                 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS active_simulations (
@@ -157,8 +165,9 @@ class AlphaDB:
                     expression, alpha_id, fitness, sharpe, turnover,
                     returns, margin, long_count, short_count, grade,
                     source, region, universe, delay, decay,
-                    neutralization, truncation, status, checks, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    neutralization, truncation, status, checks, raw_json,
+                    lifecycle_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(expression, region, universe, neutralization) DO UPDATE SET
                     fitness=excluded.fitness,
                     sharpe=excluded.sharpe,
@@ -169,6 +178,11 @@ class AlphaDB:
                     status=excluded.status,
                     checks=excluded.checks,
                     raw_json=excluded.raw_json,
+                    lifecycle_state=CASE
+                        WHEN alphas.lifecycle_state IN ('submitted', 'checked')
+                        THEN alphas.lifecycle_state
+                        ELSE excluded.lifecycle_state
+                    END,
                     created_at=CURRENT_TIMESTAMP
                 """,
                 (
@@ -191,7 +205,8 @@ class AlphaDB:
                     settings.get("truncation", 0.01),
                     alpha_data.get("status", "tested"),
                     json.dumps(is_data.get("checks", [])),
-                    json.dumps(alpha_data)
+                    json.dumps(alpha_data),
+                    AlphaState.SIMULATED.value,  # first insert = just simulated
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -474,6 +489,92 @@ class AlphaDB:
             "recent_alphas": self.count_alphas(days=days),
             "successful_alphas": len(self.get_successful_alphas()),
         }
+
+    # ── Lifecycle State Management ──────────────────────────────────
+
+    def transition_state(
+        self,
+        expression: str,
+        new_state: AlphaState,
+        *,
+        region: str = "USA",
+        universe: str = "TOP3000",
+        neutralization: str = "INDUSTRY",
+    ) -> bool:
+        """Transition an alpha to a new lifecycle state with validation."""
+        current = self.get_lifecycle_state(
+            expression, region=region, universe=universe,
+            neutralization=neutralization,
+        )
+        validate_transition(current, new_state)
+
+        with self._cursor() as cur:
+            cur.execute(
+                """UPDATE alphas SET lifecycle_state = ?
+                   WHERE expression = ? AND region = ?
+                     AND universe = ? AND neutralization = ?""",
+                (new_state.value, expression, region, universe, neutralization),
+            )
+            return cur.rowcount > 0
+
+    def get_lifecycle_state(
+        self,
+        expression: str,
+        *,
+        region: str = "USA",
+        universe: str = "TOP3000",
+        neutralization: str = "INDUSTRY",
+    ) -> AlphaState:
+        """Get the current lifecycle state of an alpha."""
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT lifecycle_state FROM alphas
+                   WHERE expression = ? AND region = ?
+                     AND universe = ? AND neutralization = ?""",
+                (expression, region, universe, neutralization),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return AlphaState(row[0])
+            return AlphaState.SIMULATED  # default for backwards compat
+
+    def get_alphas_by_state(
+        self, state: AlphaState, limit: int = 100
+    ) -> List[Dict]:
+        """Query alphas by lifecycle state, ordered by fitness DESC."""
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT * FROM alphas WHERE lifecycle_state = ?
+                   ORDER BY fitness DESC LIMIT ?""",
+                (state.value, limit),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def count_by_state(self, state: Optional[AlphaState] = None) -> int:
+        """Count alphas by lifecycle state, or all if state is None."""
+        with self._cursor() as cur:
+            if state:
+                cur.execute(
+                    "SELECT COUNT(*) FROM alphas WHERE lifecycle_state = ?",
+                    (state.value,),
+                )
+            else:
+                cur.execute("SELECT COUNT(*) FROM alphas")
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+
+    def mark_all_submitted_in_batch(self, alpha_ids: List[str]) -> int:
+        """Mark alphas as SUBMITTED by their WQ alpha_id."""
+        count = 0
+        with self._cursor() as cur:
+            for aid in alpha_ids:
+                cur.execute(
+                    """UPDATE alphas SET lifecycle_state = ?
+                       WHERE alpha_id = ?""",
+                    (AlphaState.SUBMITTED.value, aid),
+                )
+                count += cur.rowcount
+        return count
 
     # ── Migration ────────────────────────────────────────────────────
 

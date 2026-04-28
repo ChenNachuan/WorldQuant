@@ -194,26 +194,11 @@ class ModelFleetManager:
             return False
     
     def update_alpha_generator_config(self, model_name: str):
-        """Update the alpha generator configuration to use the new model."""
+        """Persist the new default model via config (no source-code editing)."""
         try:
-            # Update the default model in alpha_generator_ollama.py
-            with open('core/alpha_generator_ollama.py', 'r') as f:
-                content = f.read()
-            
-            # Replace the default model
-            content = content.replace(
-                "default='qwen3.5:35b'",
-                f"default='{model_name}'"
-            )
-            content = content.replace(
-                "getattr(self, 'model_name', 'qwen3.5:35b')",
-                f"getattr(self, 'model_name', '{model_name}')"
-            )
-            
-            with open('core/alpha_generator_ollama.py', 'w') as f:
-                f.write(content)
-            
-            logger.info(f"Updated alpha generator config to use {model_name}")
+            from core.config import set_default_model
+            set_default_model(model_name)
+            logger.info(f"Updated default model to {model_name}")
         except Exception as e:
             logger.error(f"Error updating alpha generator config: {e}")
     

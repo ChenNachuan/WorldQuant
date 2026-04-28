@@ -1,7 +1,9 @@
 import argparse
+import asyncio
 import requests
 import json
 import os
+import uuid
 from time import sleep
 from requests.auth import HTTPBasicAuth
 from typing import List, Dict, Optional, Tuple
@@ -61,11 +63,12 @@ class RetryQueue:
             time.sleep(1)  # Prevent busy waiting
 
 class AlphaGenerator:
-    def __init__(self, ollama_url: str = None, max_concurrent: int = 2, region_key: str = "USA"):
-        from .config import load_credentials, get_ollama_url
-        self.sess = requests.Session()
-        self._fix_proxy()
-        self.setup_auth()
+    def __init__(self, ollama_url: str = None, max_concurrent: int = 2, region_key: str = "USA",
+                 sim_timeout: int = 1800):
+        from .config import get_ollama_url, get_default_model
+        from .api_session import get_session_manager
+        self._api = get_session_manager()
+        self.sess = self._api.session
         self.ollama_url = ollama_url or get_ollama_url()
         self.results = []
         self.pending_results = {}
@@ -73,8 +76,9 @@ class AlphaGenerator:
         self.executor = ThreadPoolExecutor(max_workers=max_concurrent)
         self.vram_cleanup_interval = 10
         self.operation_count = 0
-        
-        self.model_name = getattr(self, 'model_name', 'qwen3.5:35b')
+        self.sim_timeout = sim_timeout
+
+        self.model_name = get_default_model()
         self.initial_model = self.model_name
         self.error_count = 0
         self.max_errors_before_downgrade = 3
@@ -202,33 +206,11 @@ class AlphaGenerator:
             logger.info(f"Lazy-init AST validator with {len(op_names)} operators, {len(field_ids)} fields")
     
     def _fix_proxy(self) -> None:
-        from .config import fix_session_proxy
-        fix_session_proxy(self.sess)
-    
+        self._api._apply_proxy()
+
     def setup_auth(self) -> None:
-        from .config import load_credentials
-        logger.info("Loading credentials from .env")
-        username, password = load_credentials()
-        self.sess.auth = HTTPBasicAuth(username, password)
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                logger.info("Authenticating with WorldQuant Brain...")
-                response = self.sess.post('https://api.worldquantbrain.com/authentication', timeout=(15, 30))
-                logger.info(f"Authentication response status: {response.status_code}")
-                
-                if response.status_code != 201:
-                    raise Exception(f"Authentication failed: {response.text}")
-                return
-            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Auth SSL/Connection error attempt {attempt+1}/{max_retries}: {str(e)[:100]}")
-                    self._fix_proxy()
-                    sleep(5)
-                else:
-                    raise
-    
+        self._api.ensure_authenticated()
+
     def cleanup_vram(self):
         """Perform VRAM cleanup by forcing garbage collection and waiting."""
         try:
@@ -620,14 +602,21 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
                     sim_id = result.get("result", {}).get("id")
                     progress_url = result.get("result", {}).get("progress_url")
                     if sim_id and progress_url:
-                        self.pending_results[sim_id] = {
-                            "alpha": alpha,
-                            "progress_url": progress_url,
-                            "status": "pending",
-                            "attempts": 0
-                        }
-                        submitted += 1
-                        logger.info(f"Successfully submitted {alpha} (ID: {sim_id})")
+                        # Acquire a simulation slot
+                        slot_id = str(uuid.uuid4())
+                        if self.slot_manager.acquire_slot(slot_id):
+                            self.pending_results[sim_id] = {
+                                "alpha": alpha,
+                                "progress_url": progress_url,
+                                "status": "pending",
+                                "attempts": 0,
+                                "slot_id": slot_id,  # track for release
+                            }
+                            submitted += 1
+                            logger.info(f"Successfully submitted {alpha} (ID: {sim_id})")
+                        else:
+                            logger.warning(f"Slot limit reached, dequeuing {alpha[:50]}")
+                            self.retry_queue.add(alpha)
                         
                 except Exception as e:
                     logger.error(f"Error submitting alpha {alpha}: {str(e)}")
@@ -644,17 +633,20 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
         max_monitoring_time = 21600  # 6 hours maximum monitoring time
         start_time = time.time()
         
+        poll_attempts = 0
         while self.pending_results:
             # Check for timeout
             if time.time() - start_time > max_monitoring_time:
                 logger.warning(f"Monitoring timeout reached ({max_monitoring_time}s), stopping monitoring")
                 logger.warning(f"Remaining pending simulations: {list(self.pending_results.keys())}")
                 break
-                
+
             logger.info(f"Monitoring {len(self.pending_results)} pending simulations...")
             completed = self.check_pending_results()
             total_successful += completed
-            sleep(5)  # Wait between checks
+            poll_attempts += 1
+            delay = min(5 * (1.5 ** poll_attempts), 60)
+            sleep(delay)  # Exponential backoff, capped at 60s
         
         logger.info(f"Batch complete: {total_successful} successful simulations")
         return total_successful
@@ -667,11 +659,10 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
         
         for sim_id, info in self.pending_results.items():
             if info["status"] == "pending":
-                # Check if simulation has been pending too long (30 minutes)
                 if "start_time" not in info:
                     info["start_time"] = time.time()
-                elif time.time() - info["start_time"] > 1800:  # 30 minutes
-                    logger.warning(f"Simulation {sim_id} has been pending for too long, marking as failed")
+                elif time.time() - info["start_time"] > self.sim_timeout:
+                    logger.warning(f"Simulation {sim_id} has been pending for too long ({self.sim_timeout}s), marking as failed")
                     completed.append(sim_id)
                     continue
                 try:
@@ -680,6 +671,8 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
                     
                     # Handle rate limits
                     if sim_progress_resp.status_code == 429:
+                        retry_after = float(sim_progress_resp.headers.get("Retry-After", 30))
+                        self._api.report_rate_limit(retry_after)
                         logger.info("Rate limit hit, will retry later")
                         continue
                         
@@ -743,12 +736,18 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
                 except Exception as e:
                     logger.error(f"Error checking result for {sim_id}: {str(e)}")
         
-        # Remove completed simulations
+        # Remove completed simulations and release slots
         for sim_id in completed:
+            info = self.pending_results.get(sim_id, {})
+            if info.get("slot_id"):
+                self.slot_manager.release_slot(info["slot_id"])
             del self.pending_results[sim_id]
-        
-        # Requeue failed simulations
+
+        # Requeue failed simulations and release slots
         for alpha, sim_id in retry_queue:
+            info = self.pending_results.get(sim_id, {})
+            if info.get("slot_id"):
+                self.slot_manager.release_slot(info["slot_id"])
             del self.pending_results[sim_id]
             self.retry_queue.add(alpha)
         
@@ -822,50 +821,34 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
             settings = self.region_config.to_simulation_settings()
             if custom_settings:
                 settings.update(custom_settings)
-                
             simulation_data = {
                 'type': 'REGULAR',
                 'settings': settings,
                 'regular': alpha_expression
             }
+            self._api.ensure_authenticated()
             return self.sess.post('https://api.worldquantbrain.com/simulations', json=simulation_data, timeout=(30, 120))
 
-        max_ssl_retries = 2
-        for attempt in range(max_ssl_retries + 1):
-            try:
-                sim_resp = submit_simulation()
-                break
-            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
-                if attempt < max_ssl_retries:
-                    logger.warning(f"SSL/Connection error on attempt {attempt+1}/{max_ssl_retries+1}, re-authenticating: {str(e)[:100]}")
-                    self._fix_proxy()
-                    self.setup_auth()
-                    sleep(5)
-                else:
-                    logger.error(f"SSL/Connection error after {max_ssl_retries+1} attempts: {str(e)[:200]}")
-                    return {"status": "error", "message": str(e)}
-            except requests.exceptions.Timeout as e:
-                logger.error(f"Timeout testing alpha {alpha_expression}: {str(e)[:100]}")
-                return {"status": "error", "message": str(e)}
+        try:
+            sim_resp = self._api.request_with_retry('POST', 'https://api.worldquantbrain.com/simulations',
+                                                     json={'type': 'REGULAR',
+                                                           'settings': self.region_config.to_simulation_settings(),
+                                                           'regular': alpha_expression},
+                                                     timeout=(30, 120))
+        except Exception as e:
+            logger.error(f"Error testing alpha {alpha_expression}: {str(e)}")
+            return {"status": "error", "message": str(e), "expr": alpha_expression}
 
         try:
-            if sim_resp.status_code == 401 or (
-                sim_resp.status_code == 400 and 
-                "authentication credentials" in sim_resp.text.lower()
-            ):
-                logger.warning("Authentication expired, refreshing session...")
-                self.setup_auth()
-                sim_resp = submit_simulation()
-            
-            if sim_resp.status_code != 201:
-                return {"status": "error", "message": sim_resp.text}
-
             sim_progress_url = sim_resp.headers.get('location')
             if not sim_progress_url:
-                return {"status": "error", "message": "No progress URL received"}
+                return {"status": "error", "message": "No progress URL received" if sim_resp.status_code != 201 else sim_resp.text}
+
+            if sim_resp.status_code not in (200, 201):
+                return {"status": "error", "message": sim_resp.text}
 
             return {
-                "status": "success", 
+                "status": "success",
                 "result": {
                     "id": f"{time.time()}_{random.random()}",
                     "progress_url": sim_progress_url,
@@ -873,19 +856,22 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
                 },
                 "expr": alpha_expression
             }
-            
+
         except Exception as e:
-            logger.error(f"Error testing alpha {alpha_expression}: {str(e)}")
+            logger.error(f"Error processing simulation response for {alpha_expression}: {str(e)}")
             return {"status": "error", "message": str(e), "expr": alpha_expression}
 
     def wait_for_simulation(self, progress_url: str, expr: str) -> Dict:
         """Wait for a single simulation to complete and fetch its alpha data."""
         logger.info(f"Polling individual simulation for: {expr[:50]}...")
+        poll_attempts = 0
         while True:
             try:
                 resp = self.sess.get(progress_url, timeout=60)
                 if resp.status_code == 429:
-                    time.sleep(5)
+                    retry_after = float(resp.headers.get("Retry-After", 30))
+                    self._api.report_rate_limit(retry_after)
+                    time.sleep(retry_after)
                     continue
                 
                 data = resp.json()
@@ -910,8 +896,19 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
 
     def log_hopeful_alpha(self, expression: str, alpha_data: Dict) -> None:
         from .alpha_db import get_alpha_db
+        from .alpha_lifecycle import AlphaState
         db = get_alpha_db()
         db.save_alpha(expression, alpha_data, source="generator")
+        settings = alpha_data.get("settings", {})
+        region = settings.get("region", "USA")
+        universe = settings.get("universe", "TOP3000")
+        neutralization = settings.get("neutralization", "INDUSTRY")
+        try:
+            db.transition_state(expression, AlphaState.SIMULATED,
+                               region=region, universe=universe,
+                               neutralization=neutralization)
+        except ValueError:
+            pass  # already in a later state
 
         is_data = alpha_data.get("is", {})
         fitness = is_data.get("fitness")
@@ -976,6 +973,68 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
                     return []
         
         return []
+
+    async def async_test_alpha_batch(self, alphas: List[str]) -> int:
+        """Async version of test_alpha_batch using asyncio for polling."""
+        from .async_poller import AsyncSimulationPoller
+        import uuid as _uuid
+
+        poller = AsyncSimulationPoller(
+            self._api,
+            max_concurrent=self.slot_manager.max_concurrent,
+            timeout_per_sim=self.sim_timeout,
+        )
+
+        loop = asyncio.get_running_loop()
+        sim_ids = []
+        submitted = 0
+
+        for alpha in alphas:
+            sim_id = str(_uuid.uuid4())
+            acquired = await asyncio.to_thread(
+                self.slot_manager.acquire_slot, sim_id
+            )
+            if not acquired:
+                logger.warning("Could not acquire slot for %s", alpha[:50])
+                continue
+
+            result = await loop.run_in_executor(
+                self.executor, self._test_alpha_impl, alpha
+            )
+
+            if result.get("status") == "success":
+                progress_url = result["result"]["progress_url"]
+                poller.add(sim_id, alpha, progress_url)
+                sim_ids.append(sim_id)
+                submitted += 1
+            else:
+                if "SIMULATION_LIMIT_EXCEEDED" in result.get("message", ""):
+                    self.retry_queue.add(alpha)
+                self.slot_manager.release_slot(sim_id)
+
+        logger.info("Async batch: %d/%d submitted", submitted, len(alphas))
+        if not sim_ids:
+            return 0
+
+        results = await poller.poll_all()
+
+        successful = 0
+        for sim_id, result in results.items():
+            if result.get("status") in ("COMPLETE", "WARNING"):
+                alpha_data = result.get("alpha_data", {})
+                alpha = result.get("alpha", "")
+                self.log_hopeful_alpha(alpha, alpha_data)
+                self.results.append({
+                    "alpha": alpha, "result": result, "alpha_data": alpha_data,
+                })
+                fitness = (alpha_data.get("is", {}).get("fitness") or 0)
+                if fitness > 1.0:
+                    successful += 1
+            self.slot_manager.release_slot(sim_id)
+
+        logger.info("Async batch complete: %d successful", successful)
+        return successful
+
 
 def extract_expressions(alphas):
     """Extract expressions from submitted alphas"""
@@ -1078,7 +1137,9 @@ def main():
                                              help='Ollama model to use (default: qwen3.5:35b)')
     parser.add_argument('--max-concurrent', type=int, default=2,
                       help='Maximum concurrent simulations (default: 2)')
-    
+    parser.add_argument('--sim-timeout', type=int, default=1800,
+                      help='Timeout per simulation in seconds (default: 1800)')
+
     args = parser.parse_args()
     
     import logging
@@ -1090,7 +1151,7 @@ def main():
     
     try:
         # Initialize alpha generator with Ollama
-        generator = AlphaGenerator(ollama_url=args.ollama_url, max_concurrent=args.max_concurrent)
+        generator = AlphaGenerator(ollama_url=args.ollama_url, max_concurrent=args.max_concurrent, sim_timeout=args.sim_timeout)
         generator.model_name = args.ollama_model  # Set the model name
         generator.initial_model = args.ollama_model  # Set the initial model for reset
         

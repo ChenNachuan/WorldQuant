@@ -12,42 +12,22 @@ from .log_manager import setup_logger
 logger = setup_logger(__name__, "submitter")
 
 class ImprovedAlphaSubmitter:
-    def __init__(self):
-        self.sess = requests.Session()
+    def __init__(self, daily_limit: int = 10):
+        from .api_session import get_session_manager
+        self._api = get_session_manager()
+        self.sess = self._api.session
         self.sess.timeout = (30, 300)
-        from .config import fix_session_proxy
-        fix_session_proxy(self.sess)
-        self.setup_auth()
-    
+
     def _reconnect(self) -> None:
         logger.warning("Reconnecting session due to connection error...")
-        self._fix_proxy()
-        self.setup_auth()
-    
+        self._api._apply_proxy()
+        self._api._authenticate()
+
     def _fix_proxy(self) -> None:
-        from .config import fix_session_proxy
-        fix_session_proxy(self.sess)
-        
+        self._api._apply_proxy()
+
     def setup_auth(self) -> None:
-        from .config import load_credentials
-        username, password = load_credentials()
-        self.sess.auth = HTTPBasicAuth(username, password)
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = self.sess.post('https://api.worldquantbrain.com/authentication', timeout=(15, 30))
-                if response.status_code != 201:
-                    raise Exception(f"Authentication failed: {response.text}")
-                logger.info("Successfully authenticated with WorldQuant Brain")
-                return
-            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Auth connection error attempt {attempt+1}/{max_retries}: {str(e)[:100]}")
-                    self._fix_proxy()
-                    time.sleep(5)
-                else:
-                    raise
+        self._api.ensure_authenticated()
 
     def check_hopeful_alphas_count(self, min_count: int = 50) -> bool:
         from .alpha_db import get_alpha_db
@@ -101,6 +81,7 @@ class ImprovedAlphaSubmitter:
                 
                 if response.status_code == 429:  # Too Many Requests
                     wait_time = int(response.headers.get('Retry-After', base_delay * (2 ** attempt)))
+                    self._api.report_rate_limit(wait_time)
                     logger.info(f"Rate limited. Waiting {wait_time} seconds...")
                     time.sleep(wait_time)
                     continue
@@ -244,6 +225,16 @@ class ImprovedAlphaSubmitter:
         checks = alpha.get("checks", [])
         return any(check.get("result") == "FAIL" for check in checks)
 
+    def _mark_local_submitted(self, alpha_id: str):
+        """Update the local DB lifecycle_state to SUBMITTED."""
+        try:
+            from .alpha_db import get_alpha_db
+            from .alpha_lifecycle import AlphaState
+            db = get_alpha_db()
+            db.mark_all_submitted_in_batch([alpha_id])
+        except Exception as e:
+            logger.debug(f"Could not update local state for {alpha_id}: {e}")
+
     def submit_alpha(self, alpha_id: str) -> bool:
         """Submit a single alpha and monitor its status."""
         url = f"https://api.worldquantbrain.com/alphas/{alpha_id}/submit"
@@ -261,12 +252,13 @@ class ImprovedAlphaSubmitter:
                 
                 if response.status_code == 201:
                     logger.info(f"Successfully submitted alpha {alpha_id}, monitoring status...")
-                    
+
                     # Monitor submission status with longer timeout
                     result = self.monitor_submission(alpha_id, max_timeout_minutes=20)
                     if result:
                         self.log_submission_result(alpha_id, result)
                         if result.get("status") in ["success", "already_submitted"]:
+                            self._mark_local_submitted(alpha_id)
                             return True
                         else:
                             logger.error(f"Submission failed for alpha {alpha_id}: {result.get('error', 'Unknown error')}")
@@ -313,23 +305,42 @@ class ImprovedAlphaSubmitter:
         return False
 
     def submit_hopeful_alphas(self, batch_size: int = 3) -> None:
-        """Submit hopeful alphas from JSON file with improved error handling."""
+        """Submit hopeful alphas from local DB with quality filtering and quota awareness."""
         logger.info(f"Starting hopeful alphas submission with batch size {batch_size}")
-        
+
+        from .submission_quota import get_submission_quota
+        quota = get_submission_quota()
+        if not quota.can_submit():
+            logger.info(f"Daily quota exhausted ({quota.count_today()}/{quota.daily_limit}), skipping")
+            return
+
         # Load hopeful alphas
         hopeful_alphas = self.load_hopeful_alphas()
         if not hopeful_alphas:
             logger.info("No hopeful alphas to process")
             return
-        
-        # Filter out alphas with FAIL checks
-        valid_alphas = [alpha for alpha in hopeful_alphas if not self.has_fail_checks(alpha)]
-        logger.info(f"Found {len(valid_alphas)} valid alphas after filtering FAILs")
-        
+
+        # Filter: no FAIL checks AND meet quality thresholds
+        valid_alphas = [
+            alpha for alpha in hopeful_alphas
+            if not self.has_fail_checks(alpha)
+        ]
+        logger.info(f"Found {len(valid_alphas)} alphas without FAIL checks")
+
+        # Sort by fitness DESC so we submit the best alphas first
+        valid_alphas.sort(
+            key=lambda a: (
+                a.get("backtest", {}).get("fitness")
+                or a.get("fitness")
+                or 0
+            ),
+            reverse=True,
+        )
+
         if not valid_alphas:
             logger.info("No valid alphas to submit")
             return
-        
+
         # Submit valid alphas in batches
         total_submitted = 0
         consecutive_failures = 0
@@ -354,32 +365,39 @@ class ImprovedAlphaSubmitter:
                 logger.info(f"Submitting alpha {alpha_id}:")
                 logger.info(f"Expression: {expression}")
                 logger.info(f"Metrics: {metrics}")
-                
+
                 if self.submit_alpha(alpha_id):
                     batch_successes += 1
                     total_submitted += 1
                     consecutive_failures = 0
+                    quota.record_submission(alpha_id)
+                    if not quota.can_submit():
+                        logger.info(f"Daily quota reached ({quota.daily_limit}), stopping")
+                        break
                 else:
                     consecutive_failures += 1
-                
+
                 # Wait between submissions to avoid rate limiting
                 time.sleep(30)
-            
+
+            if not quota.can_submit():
+                break
+
             if batch_successes == 0:
                 consecutive_failures += 1
                 logger.warning(f"Batch failed. Consecutive failures: {consecutive_failures}")
-                
+
                 if consecutive_failures >= max_consecutive_failures:
                     logger.error(f"Too many consecutive failures ({consecutive_failures}), stopping submission")
                     break
             else:
                 consecutive_failures = 0
-            
+
             # Wait between batches
             if i + batch_size < len(valid_alphas):
                 logger.info(f"Waiting 120 seconds before next batch...")
                 time.sleep(120)
-        
+
         logger.info(f"Hopeful alphas submission complete. Total alphas submitted: {total_submitted}")
         
         # Clean up hopeful_alphas.json after successful submission
@@ -422,6 +440,7 @@ class ImprovedAlphaSubmitter:
                 response = self.sess.get(url, params=params, timeout=(15, 60))
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 30))
+                    self._api.report_rate_limit(retry_after)
                     logger.info(f"Rate limited, waiting {retry_after}s")
                     time.sleep(retry_after)
                     continue
@@ -458,6 +477,19 @@ class ImprovedAlphaSubmitter:
     def batch_submit(self, batch_size: int = 3) -> None:
         """Submit alphas in batches with improved error handling."""
         logger.info(f"Starting batch submission with batch size {batch_size}")
+
+        from .submission_quota import get_submission_quota
+        quota = get_submission_quota()
+        if not quota.can_submit():
+            logger.info(f"Daily quota exhausted ({quota.count_today()}/{quota.daily_limit}), skipping")
+            return
+
+        # Mark submittable alphas green before submitting
+        try:
+            self.mark_submittable_alphas_green()
+        except Exception as e:
+            logger.warning(f"mark_submittable_alphas_green failed (non-fatal): {e}")
+
         offset = 0
         total_submitted = 0
         consecutive_failures = 0
@@ -497,35 +529,42 @@ class ImprovedAlphaSubmitter:
                 logger.info(f"Submitting alpha {alpha_id}:")
                 logger.info(f"Expression: {expression}")
                 logger.info(f"Metrics: {metrics}")
-                
+
                 if self.submit_alpha(alpha_id):
                     batch_successes += 1
                     total_submitted += 1
                     consecutive_failures = 0
+                    quota.record_submission(alpha_id)
+                    if not quota.can_submit():
+                        logger.info(f"Daily quota reached ({quota.daily_limit}), stopping")
+                        break
                 else:
                     consecutive_failures += 1
-                
+
                 # Wait between submissions to avoid rate limiting
                 time.sleep(30)
-            
+
+            if not quota.can_submit():
+                break
+
             if batch_successes == 0:
                 consecutive_failures += 1
                 logger.warning(f"Batch failed. Consecutive failures: {consecutive_failures}")
-                
+
                 if consecutive_failures >= max_consecutive_failures:
                     logger.error(f"Too many consecutive failures ({consecutive_failures}), stopping submission")
                     break
             else:
                 consecutive_failures = 0
-            
+
             if not response.get("next"):
                 logger.info("No more pages to process")
                 break
-                
+
             offset += batch_size
             logger.info(f"Waiting 120 seconds before next batch...")
             time.sleep(120)
-        
+
         logger.info(f"Submission process complete. Total alphas submitted: {total_submitted}")
 
 def main():

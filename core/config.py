@@ -22,6 +22,49 @@ def get_ollama_url() -> str:
     return os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 
+def get_default_model() -> str:
+    """Get the default Ollama model name, with env/file override.
+
+    Checks (in order):
+      1. WQ_DEFAULT_MODEL env var
+      2. data/model_config.json file
+      3. fallback: 'qwen3.5:35b'
+    """
+    env_model = os.getenv("WQ_DEFAULT_MODEL")
+    if env_model:
+        return env_model
+
+    config_path = os.path.join("data", "model_config.json")
+    if os.path.exists(config_path):
+        try:
+            import json
+            with open(config_path) as f:
+                data = json.load(f)
+            model = data.get("default_model")
+            if model:
+                return model
+        except Exception:
+            pass
+
+    return "qwen3.5:35b"
+
+
+def set_default_model(model_name: str):
+    """Persist the default model to a data file (never modifies source code)."""
+    import json
+    from datetime import datetime
+    config_path = os.path.join("data", "model_config.json")
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(
+            {
+                "default_model": model_name,
+                "updated_at": datetime.now().isoformat(),
+            },
+            f,
+        )
+
+
 def fix_session_proxy(sess: requests.Session) -> None:
     for k in ['all_proxy', 'ALL_PROXY']:
         if os.environ.pop(k, None):
