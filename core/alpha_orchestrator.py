@@ -6,7 +6,7 @@ import time
 import schedule
 from datetime import datetime, timedelta
 from typing import List, Dict
-from requests.auth import HTTPBasicAuth
+
 import subprocess
 import sys
 import threading

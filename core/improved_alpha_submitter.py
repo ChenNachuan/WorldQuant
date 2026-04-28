@@ -2,7 +2,7 @@ import requests
 import json
 import time
 import os
-from requests.auth import HTTPBasicAuth
+
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse

@@ -5,7 +5,7 @@ import json
 import os
 import uuid
 from time import sleep
-from requests.auth import HTTPBasicAuth
+
 from typing import List, Dict, Optional, Tuple
 import time
 import re
@@ -817,22 +817,13 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
         return final_results
 
     def _test_alpha_impl(self, alpha_expression: str, custom_settings: Optional[Dict] = None) -> Dict:
-        def submit_simulation():
+        try:
             settings = self.region_config.to_simulation_settings()
             if custom_settings:
                 settings.update(custom_settings)
-            simulation_data = {
-                'type': 'REGULAR',
-                'settings': settings,
-                'regular': alpha_expression
-            }
-            self._api.ensure_authenticated()
-            return self.sess.post('https://api.worldquantbrain.com/simulations', json=simulation_data, timeout=(30, 120))
-
-        try:
             sim_resp = self._api.request_with_retry('POST', 'https://api.worldquantbrain.com/simulations',
                                                      json={'type': 'REGULAR',
-                                                           'settings': self.region_config.to_simulation_settings(),
+                                                           'settings': settings,
                                                            'regular': alpha_expression},
                                                      timeout=(30, 120))
         except Exception as e:
@@ -864,7 +855,6 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
     def wait_for_simulation(self, progress_url: str, expr: str) -> Dict:
         """Wait for a single simulation to complete and fetch its alpha data."""
         logger.info(f"Polling individual simulation for: {expr[:50]}...")
-        poll_attempts = 0
         while True:
             try:
                 resp = self.sess.get(progress_url, timeout=60)
