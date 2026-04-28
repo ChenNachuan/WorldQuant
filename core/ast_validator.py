@@ -74,8 +74,8 @@ class ASTValidator:
             errors.append("Is a comment")
 
         # Illegal character check
-        if re.search(r"[\[\]\{\}\']", expr):
-            errors.append("Contains illegal characters (e.g., [], {}, or quotes)")
+        if re.search(r"[\[\]\{\}\'\<\>\&\|]", expr):
+            errors.append("Contains illegal characters (e.g., [], {}, quotes, <, >, &, |). Use functional operators instead.")
 
         paren_balance = 0
         for ch in expr:
@@ -157,13 +157,18 @@ class ASTValidator:
 
     def _extract_field_references(self, expr: str) -> List[str]:
         operators = self._extract_operators(expr)
-        tokens = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", expr)
+        # Use negative lookbehind to avoid matching 'e' in scientific notation like '1e-6'
+        tokens = re.findall(r"(?<![0-9])[a-zA-Z_][a-zA-Z0-9_]*", expr)
         fields = [t for t in tokens if t not in operators and t not in VALID_GROUP_ARGS]
         return fields
 
     def _is_categorical_field(self, field: str) -> bool:
         field_lower = field.lower()
         return any(field_lower.endswith(s) or s + "_" in field_lower for s in CATEGORICAL_SUFFIXES)
+
+    def _extract_windows(self, expr: str) -> List[int]:
+        matches = re.findall(r",\s*(\d+)\s*\)", expr)
+        return [int(m) for m in matches if int(m) in VALID_WINDOWS]
 
     def _max_nesting_depth(self, expr: str) -> int:
         max_depth = 0

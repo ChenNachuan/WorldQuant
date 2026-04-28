@@ -2,12 +2,10 @@ import argparse
 import logging
 import requests
 import json
-import os
 import re
 from time import sleep
 from requests.auth import HTTPBasicAuth
-from typing import List, Dict, Tuple
-import time
+from typing import List, Dict
 
 from core.log_manager import setup_logger
 logger = setup_logger(__name__, "miner")
@@ -36,8 +34,10 @@ class AlphaExpressionMiner:
         logger.info("Authentication successful")
 
     def remove_alpha_from_hopeful(self, expression: str) -> bool:
-        from core.alpha_store import remove_alpha_by_expression
-        return remove_alpha_by_expression(expression)
+        from core.alpha_db import get_alpha_db
+        db = get_alpha_db()
+        removed = db.delete_alpha_by_expression(expression)
+        return removed > 0
 
     def parse_expression(self, expression: str) -> List[Dict]:
         """Parse the alpha expression to find numeric parameters and their positions."""
@@ -189,7 +189,7 @@ class AlphaExpressionMiner:
         logger.info(f"Generated {len(variations)} total variations")
         return variations
 
-    def test_alpha(self, alpha_expression: str) -> Dict:
+    def test_alpha(self, alpha_expression: str) -> dict:
         """Test an alpha expression using WorldQuant Brain simulation."""
         logger.info(f"Testing alpha: {alpha_expression}")
         

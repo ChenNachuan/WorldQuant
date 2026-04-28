@@ -1,12 +1,11 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for
+from flask import Flask, render_template, jsonify, request
 import json
 import os
-import time
 import subprocess
-import threading
+from pathlib import Path
 from datetime import datetime, timedelta
 import requests
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from core.log_manager import setup_logger, LOG_DIR
 
@@ -449,7 +448,7 @@ def api_refresh():
     return jsonify(dashboard.get_system_status())
 
 if __name__ == '__main__':
-    template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+    template_dir = Path(__file__).resolve().parent / 'templates'
     os.makedirs(template_dir, exist_ok=True)
     
     print("Starting Alpha Generator Dashboard...")
@@ -457,4 +456,4 @@ if __name__ == '__main__':
     print("Ollama WebUI: http://localhost:3000")
     print("Ollama API: http://localhost:11434")
     
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)

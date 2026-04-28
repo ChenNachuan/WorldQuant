@@ -10,7 +10,7 @@ import time
 import logging
 import threading
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,16 @@ class AlphaDB:
             cur.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_alpha_expr_settings ON alphas(expression, region, universe, neutralization)"
             )
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS dpo_pairs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prompt TEXT NOT NULL,
+                    chosen TEXT,
+                    rejected TEXT,
+                    model_name TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_error_type ON errors(error_type)"
             )
@@ -184,7 +194,7 @@ class AlphaDB:
                     json.dumps(alpha_data)
                 ),
             )
-            return cur.lastrowid
+            return int(cur.lastrowid or 0)
 
     def save_error(
         self,
@@ -204,7 +214,25 @@ class AlphaDB:
                 """,
                 (expression, error_type, error_message, fixed_expression, int(fix_successful)),
             )
-            return cur.lastrowid
+            return int(cur.lastrowid or 0)
+
+    def save_dpo_pair(
+        self,
+        prompt: str,
+        chosen: str = "",
+        rejected: str = "",
+        model_name: str = None
+    ) -> int:
+        """Save a preference pair for future LLM fine-tuning."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO dpo_pairs (prompt, chosen, rejected, model_name)
+                VALUES (?, ?, ?, ?)
+                """,
+                (prompt, chosen, rejected, model_name),
+            )
+            return int(cur.lastrowid or 0)
 
     # ── Concurrency operations ───────────────────────────────────────
 
@@ -305,6 +333,31 @@ class AlphaDB:
             query += " LIMIT 1"
             cur.execute(query, tuple(params))
             return cur.fetchone() is not None
+
+    def delete_alpha_by_expression(
+        self,
+        expression: str,
+        region: str = None,
+        universe: str = None,
+        neutralization: str = None,
+    ) -> int:
+        """Delete alpha records matching an expression and optional settings."""
+        with self._cursor() as cur:
+            query = "DELETE FROM alphas WHERE expression = ?"
+            params = [expression]
+
+            if region is not None:
+                query += " AND region = ?"
+                params.append(region)
+            if universe is not None:
+                query += " AND universe = ?"
+                params.append(universe)
+            if neutralization is not None:
+                query += " AND neutralization = ?"
+                params.append(neutralization)
+
+            cur.execute(query, tuple(params))
+            return cur.rowcount
 
     # ── Analytics / Retrospect ───────────────────────────────────────
 
@@ -474,4 +527,6 @@ def get_alpha_db(db_path: str = DB_PATH) -> AlphaDB:
     global _db_instance
     if _db_instance is None:
         _db_instance = AlphaDB(db_path)
-    return _db_instance
+    instance = _db_instance
+    assert instance is not None
+    return instance

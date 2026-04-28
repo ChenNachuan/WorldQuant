@@ -1,8 +1,9 @@
 import argparse
 import json
+import logging as py_logging
 import os
 import time
-from typing import List
+from typing import List, Dict, cast
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -72,16 +73,16 @@ def generate_templates_from_compiler(
     max_expressions: int = 500,
 ) -> List[str]:
     templates = ExpressionCompiler.get_default_templates()
-    replacements = {
-        "FIELD": field_ids[:30],
-        "FIELD2": field_ids[:20],
-        "WINDOW": [5, 20, 60, 120, 252],
-        "WINDOW2": [60, 120, 252],
+    replacements: Dict[str, List[str]] = {
+        "FIELD": [str(v) for v in field_ids[:30]],
+        "FIELD2": [str(v) for v in field_ids[:20]],
+        "WINDOW": ["5", "20", "60", "120", "252"],
+        "WINDOW2": ["60", "120", "252"],
         "GROUP": ["sector", "industry"],
         "RANK": ["5", "20"],
         "OP": ["rank", "zscore", "log", "sqrt"],
     }
-    expressions = compiler.compile_templates(templates, replacements, max_expressions=max_expressions)
+    expressions = compiler.compile_templates(templates, cast(Dict[str, List[str]], replacements), max_expressions=max_expressions)
     return expressions
 
 
@@ -93,7 +94,7 @@ def main():
     parser.add_argument('--log-level', type=str, default='INFO', choices=['DEBUG','INFO','WARNING','ERROR'])
     args = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, args.log_level), format='%(asctime)s - %(levelname)s - %(message)s')
+    py_logging.basicConfig(level=getattr(py_logging, args.log_level), format='%(asctime)s - %(levelname)s - %(message)s')
 
     s = auth_session()
 
@@ -138,8 +139,8 @@ def main():
             logger.info(f"Completed. Fitness={fitness}, Sharpe={sharpe}")
             if fitness is not None and fitness > 1:
                 try:
-                    from core.alpha_store import save_alpha
-                    save_alpha(expr, alpha, source="template_grid")
+                    from core.alpha_db import get_alpha_db
+                    get_alpha_db().save_alpha(expr, alpha, source="template_grid")
                 except Exception as e:
                     logger.error(f'Failed to save alpha: {e}')
         elif mon.get('status') == 'timeout':

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-import json
-import time
 import argparse
-import os
+import json
+import logging as py_logging
+import time
+
 from .alpha_expression_miner import AlphaExpressionMiner
 
 from core.log_manager import setup_logger
@@ -16,9 +17,9 @@ class ContinuousAlphaExpressionMiner:
         self.mining_interval = mining_interval * 3600
         
     def get_hopeful_alphas(self):
-        from core.alpha_store import load_all_alphas
+        from core.alpha_db import get_alpha_db
         try:
-            return load_all_alphas()
+            return get_alpha_db().get_all_alphas()
         except Exception as e:
             logger.error(f"Error reading alphas: {e}")
             return []
@@ -141,8 +142,8 @@ def main():
     
     args = parser.parse_args()
     
-    logging.getLogger().setLevel(getattr(logging, args.log_level))
-    
+    py_logging.getLogger().setLevel(getattr(py_logging, args.log_level))
+
     try:
         miner = ContinuousAlphaExpressionMiner(
             args.ollama_url, 

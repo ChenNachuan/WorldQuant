@@ -4,10 +4,6 @@ Test script for the Alpha Orchestrator to verify concurrent execution
 of alpha_generator_ollama and alpha_expression_miner.
 """
 
-import os
-import sys
-import time
-import json
 import logging
 from core.alpha_orchestrator import AlphaOrchestrator
 
@@ -19,7 +15,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def create_test_hopeful_alphas():
-    from core.alpha_store import save_alpha
+    from core.alpha_db import get_alpha_db
+    db = get_alpha_db()
     test_data_1 = {
         "id": "test_1",
         "grade": "A",
@@ -30,9 +27,9 @@ def create_test_hopeful_alphas():
         "grade": "A",
         "is": {"fitness": 0.7, "sharpe": 1.5, "turnover": 0.08, "returns": 0.18, "checks": []},
     }
-    save_alpha("rank(close)", test_data_1, source="test")
-    save_alpha("rank(volume)", test_data_2, source="test")
-    logger.info("Created test alphas in alpha/ directory")
+    db.save_alpha("rank(close)", test_data_1, source="test")
+    db.save_alpha("rank(volume)", test_data_2, source="test")
+    logger.info("Created test alphas in SQLite database")
 
 def test_orchestrator_initialization():
     """Test that the orchestrator can be initialized properly."""

@@ -84,6 +84,29 @@ uv run python -m web.dashboard
 
 浏览器打开 http://localhost:5000
 
+## 入口选择建议
+
+为了避免项目继续变乱，建议把入口分成三层：
+
+| 层级 | 推荐入口 | 说明 |
+|------|----------|------|
+| 主入口 | `core.alpha_orchestrator` | 默认编排入口，负责生成、挖掘、提交和调度 |
+| 辅助入口 | `core.alpha_generator_ollama`、`core.improved_alpha_submitter`、`web.dashboard` | 单独调试生成、提交和监控时使用 |
+| 实验入口 | `experiments.pipeline`、`miners/*` | 仅保留给研究和实验，不作为默认启动方式 |
+| 历史入口 | `legacy.alpha50_miner`、`legacy.alpha101_miner` | 仅保留兼容和查看历史方法 |
+
+当前项目里的 SQLite 数据库 `core/alpha_db.py` 是结果存储的唯一主线；旧的 `alpha_store` 风格调用应逐步清理掉。
+
+### 根目录脚本分类
+
+为了让根目录不再“什么都能跑”，建议把这些文件理解成以下三类：
+
+- **支持中的 CLI**：`core.alpha_orchestrator`、`core.alpha_generator_ollama`、`core.improved_alpha_submitter`、`web.dashboard`
+- **实验/研究脚本**：`experiments/pipeline.py`、`experiments/manual_breakthrough.py`、`experiments/mutate_alphas.py`、`experiments/polish_alphas.py`、`experiments/audit_cloud.py`、`experiments/check_field_bug.py`、`experiments/check_heavy_ollama.py`、`experiments/check_ollama_custom.py`
+- **历史兼容脚本**：`legacy/alpha50_miner.py`、`legacy/alpha101_miner.py`、`alpha50.csv`
+
+日常使用时只看“支持中的 CLI”；其余文件可以保留，但不要作为默认文档入口，也不要把它们混成主线流程。
+
 ## 项目结构
 
 ```
@@ -99,6 +122,18 @@ WorldQuant/
 │   ├── alpha_expression_miner_continuous.py # 持续表达式挖掘
 │   ├── template_grid_miner.py               # 模板网格挖掘
 │   └── machine_miner.py                     # 机器挖掘器
+├── experiments/                             # 研究与实验脚本
+│   ├── pipeline.py
+│   ├── manual_breakthrough.py
+│   ├── mutate_alphas.py
+│   ├── polish_alphas.py
+│   ├── audit_cloud.py
+│   ├── check_field_bug.py
+│   ├── check_heavy_ollama.py
+│   └── check_ollama_custom.py
+├── legacy/                                  # 历史兼容脚本
+│   ├── alpha50_miner.py
+│   └── alpha101_miner.py
 ├── infrastructure/                          # 基础设施与监控
 │   ├── model_fleet_manager.py               # 模型舰队管理
 │   ├── vram_monitor.py                      # VRAM 监控
@@ -134,6 +169,17 @@ WorldQuant/
 | `uv run python -m infrastructure.model_fleet_manager` | 模型舰队管理 |
 | `uv run python -m infrastructure.health_check` | 健康检查 |
 | `uv run python -m web.dashboard` | Web 仪表盘 |
+
+### 归档脚本运行方式
+
+| 命令 | 说明 |
+|------|------|
+| `uv run python -m experiments.pipeline` | 研究型闭环管道 |
+| `uv run python -m experiments.manual_breakthrough` | 手工突破脚本 |
+| `uv run python -m experiments.mutate_alphas` | 变异脚本 |
+| `uv run python -m experiments.polish_alphas` | 优化脚本 |
+| `uv run python -m legacy.alpha50_miner --csv alpha50.csv` | 历史 Alpha50 挖掘器 |
+| `uv run python -m legacy.alpha101_miner` | 历史 Alpha101 挖掘器 |
 
 ## 编排器运行模式
 

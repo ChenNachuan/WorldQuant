@@ -283,6 +283,13 @@ class AlphaGenerator:
             if ('=' in idea) or (';' in idea) or idea.startswith('Comment:'):
                 continue
             
+            # Improvement: Auto-fix division by zero potential
+            # Replace ' / field' or ' / (expr)' with ' / (field + 0.000001)'
+            # Simplified regex to catch most cases
+            idea = re.sub(r'/\s*([a-zA-Z0-9_]+)', r'/ (\1 + 0.000001)', idea)
+            # Avoid double-wrapping if already parenthesized
+            # (This is a bit heuristic but helps)
+            
             is_valid, errors = self.ast_validator.validate(idea)
             if not is_valid:
                 logger.warning(f"AST rejected: {idea[:60]} | errors: {errors}")
@@ -394,12 +401,12 @@ AVAILABLE OPERATORS:
 CRITICAL RULES:
 1. Output ONLY single-line FASTEXPR expressions. One per line. No explanations.
 2. Outermost layer MUST be `rank()` or `group_neutralize(..., sector|industry|subindustry)`.
-3. Use ONLY provided fields. NEVER use `ret` - use `returns` instead.
-4. Time windows: {{5, 10, 20, 60, 120, 252}}. Max nesting: 4 levels.
-5. DOMAIN SAFETY: `log()` or `sqrt()` on raw `returns` or negative fundamental fields WILL FAIL. Use `abs()` or `ts_rank()` first if needed.
-6. SYNTAX SAFETY: 
-   - NEVER use Python indexing like `volume[1]`. Use `delay(volume, 1)` or `ts_delta(volume, 1)`.
-   - Operators like `ts_corr`, `ts_std_dev`, `ts_mean`, `ts_scale` ALWAYS require a window parameter, e.g., `ts_mean(x, 20)`.
+3. Use ONLY provided fields. NEVER use `ret` - use `returns`.
+4. Time windows: {5, 10, 20, 60, 120, 252}. KEEP IT SIMPLE.
+5. Max nesting: 3-4 levels. DO NOT OVER-COMPLICATE.
+6. DOMAIN SAFETY: `log(x)` or `sqrt(x)` requires `abs(x)` or `ts_rank(x, d)` first to avoid negatives.
+7. DIVIDE SAFETY: Avoid division by zero. Use `x / (y + 0.001)` or similar.
+8. SYNTAX: No `volume[1]`. Use `delay(volume, 1)`.
 
 BAD EXAMPLES (DO NOT DO THIS):
 - `rank(volume[1])` -> WRONG indexing
@@ -453,10 +460,29 @@ Generate 3-5 alpha expressions following the {theme_id} logic.
             logger.error(f"Error in {theme_id} generation: {str(e)}")
             return []
 
+    def generate_with_custom_prompt(self, prompt: str) -> List[str]:
+        """Directly call Ollama with a custom prompt and return cleaned expressions."""
+        ollama_data = {
+            'model': self.model_name,
+            'prompt': prompt,
+            'stream': False,
+        }
+        try:
+            # Use requests directly to avoid WorldQuant auth headers
+            response = requests.post(f'{self.ollama_url}/api/generate', json=ollama_data, timeout=300)
+            if response.status_code != 200:
+                logger.error(f"Ollama error {response.status_code}: {response.text}")
+                return []
+            content = response.json().get('response', '')
+            logger.info(f"Ollama raw response length: {len(content)}")
+            alpha_ideas = []
+            for line in content.split('\n'):
+                line = line.strip().replace('`', '')
+                if '(' in line and ')' in line:
+                    alpha_ideas.append(line)
+            return alpha_ideas
         except Exception as e:
-            if "token limit" in str(e).lower():
-                self._hit_token_limit = True  # Mark that we hit token limit
-            logger.error(f"Error generating alpha ideas: {str(e)}")
+            logger.error(f"Custom prompt generation failed: {e}")
             return []
     
     def _handle_ollama_error(self, error_type: str):
@@ -737,107 +763,59 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
         return result
 
     def test_alphas_batch(self, items: List[Tuple[str, Optional[Dict]]]) -> List[Dict]:
-        """Test multiple alphas simultaneously using native API batch submission."""
+        """Test multiple alphas by individual submissions (Original/Fallback method)."""
         if not items:
             return []
             
-        sim_data_list = []
-        for expr, custom_settings in items:
-            settings = self.region_config.to_simulation_settings()
-            if custom_settings:
-                settings.update(custom_settings)
+        results = []
+        for i, (expr, settings) in enumerate(items):
+            logger.info(f"Submitting alpha {i+1}/{len(items)}: {expr[:50]}...")
             
-            sim_data_list.append({
-                'type': 'REGULAR',
-                'settings': settings,
-                'regular': expr
-            })
-
-        try:
-            logger.info(f"Submitting {len(sim_data_list)} alphas as a single native batch...")
-            resp = self.sess.post('https://api.worldquantbrain.com/simulations', json=sim_data_list, timeout=60)
-            
-            if resp.status_code == 403:
-                logger.warning("Native Batch API returned 403 (Forbidden). Falling back to individual submissions...")
-                results = []
-                for i, (expr, settings) in enumerate(items):
-                    logger.info(f"Fallback Submission {i+1}/{len(items)}: {expr[:50]}...")
+            # Improvement: Robust 429 handling during submission
+            max_submit_retries = 3
+            sim_res = None
+            for attempt in range(max_submit_retries):
+                try:
                     sim_res = self._test_alpha_impl(expr, settings)
-                    if sim_res.get("status") == "success":
-                        final_res = self.wait_for_simulation(sim_res["result"]["progress_url"], expr)
-                        results.append(final_res)
-                    else:
-                        results.append(sim_res)
-                    if i < len(items) - 1:
-                        time.sleep(2) # Prevent rapid fire individual submissions
-                return results
-                
-            resp.raise_for_status()
-            
-            progress_url = resp.headers.get('Location')
-            if not progress_url:
-                logger.error("Batch submission failed: Missing Location header.")
-                return [{"status": "error", "message": "Missing Location header", "expr": item[0]} for item in items]
-                
-            logger.info(f"Parent batch URL received. Polling for completion...")
-            
-            # Poll the parent URL
-            while True:
-                sim_progress = self.sess.get(progress_url, timeout=60)
-                if sim_progress.status_code == 429:
-                    time.sleep(5)
-                    continue
-                    
-                data = sim_progress.json()
-                status = data.get("status")
-                
-                if status == "COMPLETE":
                     break
-                elif status == "ERROR":
-                    logger.error(f"Batch simulation failed: {data}")
-                    return [{"status": "error", "message": str(data), "expr": item[0]} for item in items]
-                    
-                retry_after = sim_progress.headers.get("Retry-After", 2)
-                time.sleep(float(retry_after))
-                
-            # Once parent is complete, fetch all children
-            children_ids = data.get("children", [])
-            logger.info(f"Batch parent complete. Extracting {len(children_ids)} child results...")
+                except Exception as e:
+                    if "429" in str(e) or "RetryError" in str(e):
+                        wait_time = (attempt + 1) * 60 # Wait 1, 2, 3 minutes
+                        logger.warning(f"⚠️ Rate limited (429) during submission. Sleeping {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Submission failed: {e}")
+                        sim_res = {"status": "error", "message": str(e), "expr": expr}
+                        break
             
-            # Use a small thread pool to fetch child reports quickly
-            results = []
+            if sim_res and sim_res.get("status") == "success":
+                # We'll collect the progress URLs and poll them in parallel
+                results.append({
+                    "expr": expr,
+                    "progress_url": sim_res["result"]["progress_url"],
+                    "status": "submitted"
+                })
+            elif sim_res:
+                results.append(sim_res)
             
-            def fetch_child(child_id):
-                child_url = f"https://api.worldquantbrain.com/simulations/{child_id}"
-                c_resp = self.sess.get(child_url, timeout=60)
-                c_data = c_resp.json()
-                
-                c_status = c_data.get("status")
-                # Ensure we have the expression to map it back, it is usually inside c_data['regular']
-                expr = c_data.get("regular", "")
-                
-                if c_status == "ERROR":
-                    return {"status": "error", "message": c_data.get("error", "Unknown error"), "expr": expr}
-                    
-                alpha_id = c_data.get("alpha")
-                if alpha_id:
-                    a_resp = self.sess.get(f'https://api.worldquantbrain.com/alphas/{alpha_id}', timeout=60)
-                    if a_resp.status_code == 200:
-                        a_data = a_resp.json()
-                        return {"status": "COMPLETE", "alpha": alpha_id, "alpha_data": a_data, "expr": expr}
-                return {"status": "error", "message": "Could not fetch alpha data", "expr": expr}
+            if i < len(items) - 1:
+                time.sleep(15 + random.random() * 15) # Increased delay to 15-30s
 
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                futures = [pool.submit(fetch_child, cid) for cid in children_ids]
-                for f in futures:
-                    results.append(f.result())
-                    
-            return results
-            
-        except Exception as e:
-            logger.error(f"Batch submission error: {str(e)}")
-            return [{"status": "error", "message": str(e), "expr": item[0]} for item in items]
+        # Poll all submitted simulations in parallel
+        final_results = []
+        
+        def poll_and_collect(item):
+            if item.get("status") == "submitted":
+                return self.wait_for_simulation(item["progress_url"], item["expr"])
+            return item
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(poll_and_collect, res) for res in results]
+            for f in futures:
+                final_results.append(f.result())
+                
+        return final_results
 
     def _test_alpha_impl(self, alpha_expression: str, custom_settings: Optional[Dict] = None) -> Dict:
         def submit_simulation():
@@ -912,20 +890,21 @@ Return ONLY the raw FASTEXPR expressions, one per line. NO markdown, NO explanat
                 
                 data = resp.json()
                 status = data.get("status")
-                logger.info(f"  Status: {status}")
+                if status is not None:
+                    logger.info(f"  Status: {status}")
                 
-                if status == "COMPLETE":
+                if status in ["COMPLETE", "WARNING"]:
                     alpha_id = data.get("alpha")
                     if alpha_id:
                         a_resp = self.sess.get(f'https://api.worldquantbrain.com/alphas/{alpha_id}', timeout=60)
                         if a_resp.status_code == 200:
-                            return {"status": "COMPLETE", "alpha": alpha_id, "alpha_data": a_resp.json(), "expr": expr}
-                    return {"status": "error", "message": "No alpha ID after completion", "expr": expr}
+                            return {"status": status, "alpha": alpha_id, "alpha_data": a_resp.json(), "expr": expr}
+                    return {"status": "error", "message": f"Finished with {status} but no alpha ID", "expr": expr}
                 elif status == "ERROR":
                     return {"status": "error", "message": data.get("error", "Sim failed"), "expr": expr}
                 
-                retry_after = float(resp.headers.get("Retry-After", 2))
-                time.sleep(retry_after)
+                retry_after = float(resp.headers.get("Retry-After", 10)) # Increased default from 2 to 10
+                time.sleep(retry_after + random.random() * 2)
             except Exception as e:
                 return {"status": "error", "message": str(e), "expr": expr}
 

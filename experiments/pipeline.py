@@ -464,12 +464,14 @@ class AlphaMiningPipeline:
                 )
                 self.quality_monitor.record(metrics)
 
-                ops = self.ast_validator.extract_operators(expr)
-                if ops:
-                    self.self_optimizer.update_operators(ops, metrics)
-                windows = self.ast_validator.extract_windows(expr)
-                if windows:
-                    self.self_optimizer.update_windows(windows, metrics)
+                # Update SelfOptimizer
+                self.self_optimizer.record_result(
+                    expression=expr,
+                    fitness=fitness,
+                    sharpe=sharpe,
+                    turnover=turnover,
+                    success=success
+                )
 
                 if success:
                     self.successful_alphas.append((expr, alpha_data))
@@ -815,3 +817,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

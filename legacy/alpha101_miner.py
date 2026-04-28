@@ -167,15 +167,15 @@ WINDOWS = [5, 10, 15, 20, 30, 60, 120, 252]
 def generate_variations(expr: str, max_variations: int = 5) -> List[str]:
     """Generate parameter variations of an expression by swapping numeric windows."""
     variations = [expr]  # always include original
-    
+
     # Find all integer parameters that look like time windows
     # Match numbers that are arguments (after comma or opening paren)
     pattern = r',\s*(\d+)\s*\)'
     matches = list(re.finditer(pattern, expr))
-    
+
     if not matches:
         return variations
-    
+
     for _ in range(max_variations - 1):
         new_expr = expr
         # For each match, randomly decide whether to vary it
@@ -189,10 +189,10 @@ def generate_variations(expr: str, max_variations: int = 5) -> List[str]:
                 start = match.start(1)
                 end = match.end(1)
                 new_expr = new_expr[:start] + str(new_val) + new_expr[end:]
-        
+
         if new_expr != expr and new_expr not in variations:
             variations.append(new_expr)
-    
+
     return variations
 
 
@@ -413,3 +413,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -28,9 +28,12 @@ gpu = [
 dev = []
 
 [project.scripts]
+# Supported, day-to-day entry points
 alpha-orchestrator = "core.alpha_orchestrator:main"
 alpha-generator = "core.alpha_generator_ollama:main"
 alpha-submitter = "core.improved_alpha_submitter:main"
+
+# Specialized miners and operational tools
 alpha-miner = "miners.alpha_expression_miner:main"
 alpha-miner-continuous = "miners.alpha_expression_miner_continuous:main"
 template-miner = "miners.template_grid_miner:main"
