@@ -200,7 +200,7 @@ MODULE_STATS = {
 | 条件 | 动作 |
 |------|------|
 | Sharpe ≥ 1.25 且 Fitness ≥ 1.0 且所有 checks 通过 | 保存到数据库（unsubmitted） |
-| Sharpe ≥ 1.25 且 Fitness ≥ 1.0 但 checks 失败 | 参数调优 → 失败则进入挽救池 |
+| Sharpe ≥ 1.25 且 Fitness ≥ 1.0 但 checks 失败 | 参数调优 → 根据检查类型决定是否 rescue |
 | Sharpe > 1.0 且 Fitness > 0.8 | 加入共享池 |
 | Sharpe < -0.8 | 加负号重测（反向因子） |
 | abs(Sharpe) + abs(Fitness) > 1.7 | 进入挽救池 |
@@ -210,7 +210,9 @@ MODULE_STATS = {
 1. 检查失败时，尝试 4 组代表性参数组合
 2. 参数组合包括不同的中性化方式（INDUSTRY/SUBINDUSTRY/SECTOR/MARKET）
 3. 任一组合通过 → 保存到数据库
-4. 全部失败 → 进入挽救池
+4. 全部失败 → 根据检查类型决定是否 rescue：
+   - TURNOVER/DRAWDOWN → 进入挽救池（可通过调整参数修复）
+   - SELF_CORRELATION → 丢弃（核心逻辑问题，rescue 无效）
 
 ### 5. 数据库状态
 

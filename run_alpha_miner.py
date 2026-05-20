@@ -73,6 +73,10 @@ CHECK_STRATEGIES = {
     }
 }
 
+# Rescue decision logic - check types
+RESCUABLE_CHECKS = ["TURNOVER", "DRAWDOWN", "TURNOVER_RATE"]
+NON_RESCUABLE_CHECKS = ["SELF_CORRELATION", "LOW_SUBMISSION_CORRELATION"]
+
 # Data directories
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 FIELDS_DIR = os.path.join(DATA_DIR, "fields")
@@ -574,6 +578,21 @@ class AlphaMiner:
             return False
         return any(check.get("result") == "FAIL" for check in checks)
 
+    def _should_rescue_after_sweep(self, failed_checks: list) -> bool:
+        """判断参数调优失败后是否应该进入 rescue_pool"""
+        # 如果失败的检查包含不可 rescue 的类型，则丢弃
+        for check in failed_checks:
+            check_upper = check.upper()
+            if any(nr in check_upper for nr in NON_RESCUABLE_CHECKS):
+                return False
+        # 如果有可 rescue 的检查类型，则进入 rescue_pool
+        for check in failed_checks:
+            check_upper = check.upper()
+            if any(r in check_upper for r in RESCUABLE_CHECKS):
+                return True
+        # 默认不 rescue
+        return False
+
     def process_result(self, factor: Dict, result: Dict) -> bool:
         """
         Process simulation result and take action.
@@ -637,17 +656,20 @@ class AlphaMiner:
                 if self._try_parameter_sweep(alpha_id, expression, failed_checks):
                     logger.info(f"Alpha {alpha_id} saved via parameter sweep")
                 else:
-                    # Parameter sweep failed, add to rescue pool
-                    logger.info(f"Adding alpha {alpha_id} to rescue pool")
-                    self.alpha_db.add_to_rescue_pool(
-                        alpha_id=alpha_id,
-                        expression=expression,
-                        sharpe=sharpe,
-                        fitness=fitness,
-                        turnover=turnover,
-                        failed_checks=failed_checks,
-                        modules_used=mod_used
-                    )
+                    # Parameter sweep failed, check if should rescue
+                    if self._should_rescue_after_sweep(failed_checks):
+                        logger.info(f"Adding alpha {alpha_id} to rescue pool (rescuable checks: {failed_checks})")
+                        self.alpha_db.add_to_rescue_pool(
+                            alpha_id=alpha_id,
+                            expression=expression,
+                            sharpe=sharpe,
+                            fitness=fitness,
+                            turnover=turnover,
+                            failed_checks=failed_checks,
+                            modules_used=mod_used
+                        )
+                    else:
+                        logger.info(f"Discarding alpha {alpha_id} (non-rescuable checks: {failed_checks})")
             else:
                 logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f} (unsubmitted)")
 
