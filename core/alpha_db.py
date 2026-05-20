@@ -59,8 +59,10 @@ class AlphaDB:
                     turnover REAL,
                     returns REAL,
                     margin REAL,
+                    pnl REAL,
                     long_count INTEGER,
                     short_count INTEGER,
+                    drawdown REAL,
                     grade TEXT,
                     source TEXT DEFAULT 'pipeline',
                     region TEXT DEFAULT 'USA',
@@ -68,7 +70,7 @@ class AlphaDB:
                     delay INTEGER DEFAULT 1,
                     decay INTEGER DEFAULT 0,
                     neutralization TEXT DEFAULT 'INDUSTRY',
-                    truncation REAL DEFAULT 0.01,
+                    truncation REAL DEFAULT 0.08,
                     status TEXT DEFAULT 'tested',
                     checks TEXT DEFAULT '[]',
                     raw_json TEXT,
@@ -76,11 +78,19 @@ class AlphaDB:
                 )
             """)
 
-            # Upgrade existing DB with raw_json if it doesn't exist
-            try:
-                cur.execute("ALTER TABLE alphas ADD COLUMN raw_json TEXT")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            # Upgrade existing DB with new columns if they don't exist
+            new_columns = [
+                ("pnl", "REAL"),
+                ("drawdown", "REAL"),
+                ("long_count", "INTEGER"),
+                ("short_count", "INTEGER"),
+                ("raw_json", "TEXT"),
+            ]
+            for col_name, col_type in new_columns:
+                try:
+                    cur.execute(f"ALTER TABLE alphas ADD COLUMN {col_name} {col_type}")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
 
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_alpha_fitness ON alphas(fitness)"
@@ -126,6 +136,7 @@ class AlphaDB:
         neutralization: str = "NONE",
         truncation: float = 0.08,
         raw_json: str = None,
+        status: str = "tested",
     ) -> int:
         """Save an alpha result. Returns the row ID."""
         checks_json = json.dumps(checks) if checks else "[]"
@@ -162,7 +173,7 @@ class AlphaDB:
                     expression, alpha_id, fitness, sharpe, turnover,
                     margin, returns, pnl, long_count, short_count,
                     drawdown, grade, checks_json, source, region, universe,
-                    delay, decay, neutralization, truncation, raw_json, "tested"
+                    delay, decay, neutralization, truncation, raw_json, status
                 ),
             )
             return int(cur.lastrowid or 0)

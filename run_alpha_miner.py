@@ -464,7 +464,6 @@ class AlphaMiner:
                                 "turnover": perf.get("turnover", 0),
                                 "margin": perf.get("margin", 0),
                                 "returns": perf.get("returns", 0),
-                                "pnl": perf.get("pnl", 0),
                                 "long_count": perf.get("longCount", 0),
                                 "short_count": perf.get("shortCount", 0),
                                 "drawdown": perf.get("drawdown", 0),
@@ -476,7 +475,6 @@ class AlphaMiner:
                                 "decay": settings.get("decay", 0),
                                 "neutralization": settings.get("neutralization", "NONE"),
                                 "truncation": settings.get("truncation", 0.08),
-                                "raw_json": json.dumps(alpha_data),
                                 "message": data.get("message", "Success")
                             }
                     return {"alpha_id": alpha_id, "status": "completed"}
@@ -562,77 +560,57 @@ class AlphaMiner:
         if is_pool_worthy:
             self.record_module_stat(mod_used, True)
             self.add_to_shared_pool(expression, sharpe, fitness, factor.get("logic", ""))
-
-            # Also save to database for tracking
-            self.alpha_db.add_alpha(
-                expression=expression,
-                alpha_id=alpha_id,
-                sharpe=sharpe,
-                fitness=fitness,
-                turnover=turnover,
-                margin=margin,
-                returns=result.get("returns", 0),
-                pnl=result.get("pnl", 0),
-                long_count=result.get("long_count", 0),
-                short_count=result.get("short_count", 0),
-                drawdown=result.get("drawdown", 0),
-                grade=result.get("grade", ""),
-                checks=result.get("checks", []),
-                source="pipeline",
-                region=result.get("region", "USA"),
-                universe=result.get("universe", "TOP3000"),
-                delay=result.get("delay", 1),
-                decay=result.get("decay", 0),
-                neutralization=result.get("neutralization", "NONE"),
-                truncation=result.get("truncation", 0.08),
-                raw_json=result.get("raw_json"),
-            )
         else:
             self.record_module_stat(mod_used, False)
 
+        # Determine alpha status
         if is_holy_grail:
             logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f}")
 
-            # Check quota
+            # Check quota and try to submit
             if self.quota.can_submit():
                 submit_result = self.submit_alpha(alpha_id)
                 if submit_result["success"]:
                     self.stats["passed"] += 1
                     self.quota.record_submission(alpha_id)
                     logger.info(f"Submitted alpha {alpha_id}")
-
-                    # Save to database with all available data
-                    self.alpha_db.add_alpha(
-                        expression=expression,
-                        alpha_id=alpha_id,
-                        sharpe=sharpe,
-                        fitness=fitness,
-                        turnover=turnover,
-                        margin=margin,
-                        returns=result.get("returns", 0),
-                        pnl=result.get("pnl", 0),
-                        long_count=result.get("long_count", 0),
-                        short_count=result.get("short_count", 0),
-                        drawdown=result.get("drawdown", 0),
-                        grade=result.get("grade", ""),
-                        checks=result.get("checks", []),
-                        source="pipeline",
-                        region=result.get("region", "USA"),
-                        universe=result.get("universe", "TOP3000"),
-                        delay=result.get("delay", 1),
-                        decay=result.get("decay", 0),
-                        neutralization=result.get("neutralization", "NONE"),
-                        truncation=result.get("truncation", 0.08),
-                        raw_json=result.get("raw_json"),
-                    )
+                    alpha_status = "submitted"
                 else:
                     # Log submission failure reason (e.g., autocorrelation)
                     error_msg = submit_result.get("error", "Unknown")
                     logger.warning(f"Alpha {alpha_id} submission failed: {error_msg}")
                     logger.warning(f"  Expression: {expression[:80]}...")
                     logger.warning(f"  S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f}")
+                    alpha_status = "submittable"
             else:
                 logger.info("Daily submission quota reached")
+                alpha_status = "submittable"
+        else:
+            alpha_status = "tested"
+
+        # Save ALL alphas to database with appropriate status
+        self.alpha_db.add_alpha(
+            expression=expression,
+            alpha_id=alpha_id,
+            sharpe=sharpe,
+            fitness=fitness,
+            turnover=turnover,
+            margin=margin,
+            returns=result.get("returns", 0),
+            long_count=result.get("long_count", 0),
+            short_count=result.get("short_count", 0),
+            drawdown=result.get("drawdown", 0),
+            grade=result.get("grade", ""),
+            checks=result.get("checks", []),
+            source="pipeline",
+            region=result.get("region", "USA"),
+            universe=result.get("universe", "TOP3000"),
+            delay=result.get("delay", 1),
+            decay=result.get("decay", 0),
+            neutralization=result.get("neutralization", "NONE"),
+            truncation=result.get("truncation", 0.08),
+            status=alpha_status,
+        )
 
         # Reverse factor detection (Sharpe < -0.8)
         elif sharpe < -0.8:
