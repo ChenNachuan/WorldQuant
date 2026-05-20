@@ -82,24 +82,6 @@ class AlphaDB:
             except sqlite3.OperationalError:
                 pass  # Column already exists
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS active_simulations (
-                    id TEXT PRIMARY KEY,
-                    process_id INTEGER,
-                    start_time REAL
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS errors (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    expression TEXT NOT NULL,
-                    error_type TEXT,
-                    error_message TEXT,
-                    fixed_expression TEXT,
-                    fix_successful INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_alpha_fitness ON alphas(fitness)"
             )
@@ -118,9 +100,6 @@ class AlphaDB:
             cur.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_alpha_expr_settings ON alphas(expression, region, universe, neutralization)"
             )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_error_type ON errors(error_type)"
-            )
 
     # ── Write operations ─────────────────────────────────────────────
 
@@ -132,33 +111,58 @@ class AlphaDB:
         alpha_id: str = "",
         turnover: float = None,
         margin: float = None,
+        returns: float = None,
+        pnl: float = None,
+        long_count: int = None,
+        short_count: int = None,
+        drawdown: float = None,
+        grade: str = None,
+        checks: list = None,
         source: str = "pipeline",
         region: str = "USA",
         universe: str = "TOP3000",
+        delay: int = 1,
+        decay: int = 0,
         neutralization: str = "NONE",
+        truncation: float = 0.08,
+        raw_json: str = None,
     ) -> int:
         """Save an alpha result. Returns the row ID."""
+        checks_json = json.dumps(checks) if checks else "[]"
         with self._cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO alphas (
                     expression, alpha_id, fitness, sharpe, turnover,
-                    margin, source, region, universe, neutralization,
-                    status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    margin, returns, pnl, long_count, short_count,
+                    drawdown, grade, checks, source, region, universe,
+                    delay, decay, neutralization, truncation, raw_json, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(expression, region, universe, neutralization) DO UPDATE SET
                     fitness=excluded.fitness,
                     sharpe=excluded.sharpe,
                     turnover=excluded.turnover,
                     margin=excluded.margin,
+                    returns=excluded.returns,
+                    pnl=excluded.pnl,
+                    long_count=excluded.long_count,
+                    short_count=excluded.short_count,
+                    drawdown=excluded.drawdown,
+                    grade=excluded.grade,
+                    checks=excluded.checks,
                     alpha_id=excluded.alpha_id,
+                    delay=excluded.delay,
+                    decay=excluded.decay,
+                    truncation=excluded.truncation,
+                    raw_json=excluded.raw_json,
                     status=excluded.status,
                     created_at=CURRENT_TIMESTAMP
                 """,
                 (
-                    expression, alpha_id, fitness, sharpe,
-                    turnover, margin, source, region, universe,
-                    neutralization, "tested"
+                    expression, alpha_id, fitness, sharpe, turnover,
+                    margin, returns, pnl, long_count, short_count,
+                    drawdown, grade, checks_json, source, region, universe,
+                    delay, decay, neutralization, truncation, raw_json, "tested"
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -190,61 +194,6 @@ class AlphaDB:
             universe=settings.get("universe", "TOP3000"),
             neutralization=settings.get("neutralization", "INDUSTRY"),
         )
-
-    def save_error(
-        self,
-        expression: str,
-        error_type: str,
-        error_message: str,
-        fixed_expression: str = None,
-        fix_successful: bool = False,
-    ) -> int:
-        """Save an error record for learning."""
-        with self._cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO errors (expression, error_type, error_message,
-                    fixed_expression, fix_successful)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (expression, error_type, error_message, fixed_expression, int(fix_successful)),
-            )
-            return int(cur.lastrowid or 0)
-
-    # ── Concurrency operations ───────────────────────────────────────
-
-    def acquire_global_slot(self, sim_id: str, max_concurrent: int = 4, timeout: float = 300.0) -> bool:
-        """Acquire a global concurrency slot using SQLite."""
-        start_wait = time.time()
-        pid = os.getpid()
-        while time.time() - start_wait < timeout:
-            try:
-                with self._cursor() as cur:
-                    # Clean up extremely old zombies (> 1 hour)
-                    cur.execute("DELETE FROM active_simulations WHERE start_time < ?", (time.time() - 3600,))
-
-                    cur.execute("SELECT COUNT(*) FROM active_simulations")
-                    count = cur.fetchone()[0]
-                    if count < max_concurrent:
-                        cur.execute(
-                            "INSERT INTO active_simulations (id, process_id, start_time) VALUES (?, ?, ?)",
-                            (sim_id, pid, time.time())
-                        )
-                        return True
-            except sqlite3.IntegrityError:
-                pass  # ID already exists
-            except Exception as e:
-                logger.error(f"Error acquiring slot: {e}")
-            time.sleep(2)
-        return False
-
-    def release_global_slot(self, sim_id: str):
-        """Release a global concurrency slot."""
-        try:
-            with self._cursor() as cur:
-                cur.execute("DELETE FROM active_simulations WHERE id = ?", (sim_id,))
-        except Exception as e:
-            logger.error(f"Error releasing slot: {e}")
 
     # ── Read operations ──────────────────────────────────────────────
 
@@ -419,33 +368,12 @@ class AlphaDB:
             )
             return [dict(row) for row in cur.fetchall()]
 
-    def get_error_stats(self, days: int = 7) -> List[Dict]:
-        """Get error type statistics."""
-        since = (datetime.now() - timedelta(days=days)).isoformat()
-        with self._cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    error_type,
-                    COUNT(*) as count,
-                    SUM(fix_successful) as fixed_count,
-                    ROUND(CAST(SUM(fix_successful) AS FLOAT) / COUNT(*) * 100, 1) as fix_rate
-                FROM errors
-                WHERE created_at >= ?
-                GROUP BY error_type
-                ORDER BY count DESC
-                """,
-                (since,),
-            )
-            return [dict(row) for row in cur.fetchall()]
-
     def get_retrospect_report(self, days: int = 7) -> Dict:
         """Generate a comprehensive retrospect report."""
         return {
             "daily_summary": self.get_daily_summary(days),
             "top_operators": self.get_operator_stats(days)[:10],
             "top_fields": self.get_field_stats(days)[:10],
-            "error_stats": self.get_error_stats(days),
             "total_alphas": self.count_alphas(),
             "recent_alphas": self.count_alphas(days=days),
             "successful_alphas": len(self.get_successful_alphas()),
