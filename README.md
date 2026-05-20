@@ -5,9 +5,10 @@
 ## 核心特性
 
 - **双 LLM 支持** — 同时支持 DeepSeek API 和本地 Ollama 模型
-- **简化 API 会话** — 直接 requests.Session，自动重试和重认证
-- **提交配额感知** — 每日提交计数，持久化追踪
-- **异步生产者-消费者** — LLM 生成 + 并发回测流水线
+- **动态赛道权重** — 强化学习风格的模块选择，按成功率动态调整
+- **基因重组** — 30% 概率从共享池提取精英因子进行杂交
+- **反向因子检测** — Sharpe < -0.8 时自动加负号重测
+- **共享因子池** — 支持团队协作，防冲突的分布式因子池
 - **智能挽救机制** — 边界因子自动变种优化
 
 ## 系统要求
@@ -21,7 +22,7 @@
 ### 1. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+pip install requests pandas python-dotenv openai
 # 或使用 uv
 uv sync
 ```
@@ -48,7 +49,30 @@ OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
 ```
 
-### 3. 启动系统
+### 3. 获取运算符
+
+```bash
+# 从 WQ Brain API 获取所有可用运算符
+python fetch_fields.py
+```
+
+运算符会保存到 `data/operators/operators.csv`
+
+### 4. 添加数据字段
+
+数据字段需要手动添加到 `data/fields/` 目录，CSV 文件需要包含 `Field` 和 `Description` 列：
+
+```bash
+# 示例：创建 price.csv
+echo "Field,Description
+close,收盘价
+open,开盘价
+high,最高价
+low,最低价
+volume,成交量" > data/fields/price.csv
+```
+
+### 5. 启动系统
 
 ```bash
 # 使用 DeepSeek API（默认）
@@ -57,6 +81,9 @@ python run_alpha_miner.py
 # 指定 LLM 提供商
 python run_alpha_miner.py --llm deepseek
 python run_alpha_miner.py --llm ollama
+
+# 指定成员 ID（团队协作时使用）
+python run_alpha_miner.py --member-id gao
 
 # 调整并发数
 python run_alpha_miner.py --workers 3
@@ -68,50 +95,105 @@ python run_alpha_miner.py --workers 3
 WorldQuant/
 ├── core/                          # 核心业务逻辑
 │   ├── config.py                  # 环境变量和凭据加载
-│   ├── api_session.py             # 简化 API 会话管理
+│   ├── api_session.py             # API 会话管理
 │   ├── alpha_db.py                # SQLite Alpha 数据库
 │   ├── llm_client.py              # 统一 LLM 客户端（Ollama + DeepSeek）
+│   ├── data_fetcher.py            # WQ 数据字段获取器
 │   ├── submission_quota.py        # 每日提交配额追踪
-│   ├── log_manager.py             # 日志管理
-│   └── alpha_lifecycle.py         # Alpha 生命周期状态机
-├── run_alpha_miner.py             # 主程序入口
-├── IQC_final.ipynb                # 参考实现（Jupyter Notebook）
+│   └── log_manager.py             # 日志管理
+├── data/                          # 运行时数据
+│   ├── fields/                    # 数据字段 CSV（按类别分组）
+│   │   ├── price.csv
+│   │   ├── volume.csv
+│   │   ├── fundamental.csv
+│   │   ├── analyst.csv
+│   │   ├── sentiment.csv
+│   │   └── options.csv
+│   ├── operators/                 # 运算符数据
+│   │   └── operators.csv
+│   └── shared_pool/               # 共享因子池（团队协作）
+├── run_alpha_miner.py             # 主程序
+├── fetch_fields.py                # 字段获取脚本
+├── IQC_final.ipynb                # 参考实现
 ├── .env.example                   # 环境变量示例
-├── pyproject.toml                 # 项目配置
 └── README.md                      # 本文件
 ```
 
+## 核心流程
+
+### 1. 字段加载
+
+系统从 `data/fields/` 目录读取 CSV 文件，每个文件代表一个数据类别：
+- `price&volume.csv` — 价格和成交量相关字段
+- `fundamental.csv` — 基本面字段
+- `analyst.csv` — 分析师数据
+- `sentiment.csv` — 情绪指标
+- `options.csv` — 期权数据
+
+### 2. 动态模块选择
+
+系统维护 5 个模块的统计数据：
+```python
+MODULE_STATS = {
+    "PRICE&VOLUME": {"tried": 0, "success": 0},
+    "FUNDAMENTAL": {"tried": 0, "success": 0},
+    "ANALYST": {"tried": 0, "success": 0},
+    "SENTIMENT": {"tried": 0, "success": 0},
+    "OPTIONS": {"tried": 0, "success": 0}
+}
+```
+
+每次生成时：
+- 根据成功率计算权重
+- 随机选择 1-2 个模块进行交叉组合
+- 成功率高的模块被选中概率更大
+
+### 3. Alpha 生成策略
+
+**新开采 (70% 概率)**
+- 根据动态权重选择模块
+- 从选中模块的字段中生成因子
+
+**基因重组 (30% 概率)**
+- 从共享池中随机选择 2 个精英因子
+- 提取核心逻辑进行杂交
+- 生成 3 个新变种
+
+**挽救裂变 (优先级最高)**
+- 对失败但有潜力的因子（|Sharpe| + |Fitness| > 1.7）
+- 生成 3 个变种进行优化
+
+### 4. 结果处理
+
+| 条件 | 动作 |
+|------|------|
+| Sharpe ≥ 1.25 且 Fitness ≥ 1.0 | 自动提交（圣杯） |
+| Sharpe > 1.0 且 Fitness > 0.8 | 加入共享池 |
+| Sharpe < -0.8 | 加负号重测（反向因子） |
+| abs(Sharpe) + abs(Fitness) > 1.7 | 触发挽救机制 |
+| 其他 | 记录失败，更新模块权重 |
+
+### 5. 共享因子池
+
+团队协作功能：
+- 每个成员有独立的 JSON 文件：`shared_pool_{member_id}.json`
+- 读取时合并所有成员的文件
+- 按 Sharpe 排序，保留前 500 个因子
+- 基因重组时从共享池提取精英
+
 ## 命令行参数
+
+### run_alpha_miner.py
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--llm` | `auto` | LLM 提供商：`auto`, `deepseek`, `ollama` |
 | `--workers` | `2` | 并发模拟 worker 数量 |
+| `--member-id` | `default` | 成员 ID（团队协作时使用） |
 
-## 核心流程
+### fetch_fields.py
 
-### Alpha 生成
-
-1. LLM 根据提供的数据字段生成 Alpha 表达式
-2. 表达式格式：`ts_decay_linear(group_neutralize(zscore(...), subindustry), 5)`
-3. 每次生成 5 个候选因子
-
-### 回测与提交
-
-1. 提交因子到 WorldQuant Brain 进行回测
-2. 轮询等待回测结果（最长 10 分钟）
-3. 根据结果决定下一步：
-   - **Sharpe ≥ 1.25 且 Fitness ≥ 1.0** → 自动提交
-   - **|Sharpe| + |Fitness| > 1.7** → 触发挽救机制，生成变种
-   - **Sharpe < -0.8** → 加负号重测（反向因子）
-   - 其他 → 记录失败，继续下一个
-
-### 挽救机制
-
-对于边界因子（表现一般但有潜力），系统会：
-1. 将因子信息发送给 LLM
-2. LLM 生成 3 个变种因子
-3. 变种因子进入回测队列
+从 WQ Brain API 获取运算符并保存到 `data/operators/operators.csv`
 
 ## 环境变量
 
@@ -119,7 +201,7 @@ WorldQuant/
 |------|------|------|
 | `WQ_USERNAME` | 是 | WorldQuant Brain 用户名 |
 | `WQ_PASSWORD` | 是 | WorldQuant Brain 密码 |
-| `DEEPSEEK_API_KEY` | 否* | DeepSeek API Key（使用 DeepSeek 时必需） |
+| `DEEPSEEK_API_KEY` | 否 | DeepSeek API Key（使用 DeepSeek 时必需） |
 | `OLLAMA_URL` | 否 | Ollama API 地址（默认 `http://localhost:11434`） |
 | `OLLAMA_MODEL` | 否 | Ollama 模型名称（默认 `qwen3:8b`） |
 
@@ -147,6 +229,20 @@ ollama pull qwen3:8b
 ollama serve
 ```
 
+## 团队协作
+
+多人协作时，每人使用不同的 `--member-id`：
+
+```bash
+# 成员 A
+python run_alpha_miner.py --member-id alice
+
+# 成员 B
+python run_alpha_miner.py --member-id bob
+```
+
+共享因子池会自动合并所有成员的因子，基因重组时会从全队精英中选择。
+
 ## 故障排除
 
 ### 认证失败
@@ -171,23 +267,18 @@ ollama serve
 
 ## 开发说明
 
-### 添加新的 LLM 提供商
+### 添加新的数据字段
 
-编辑 `core/llm_client.py`，在 `LLMClient` 类中添加新方法：
-
-```python
-def _setup_new_provider(self):
-    # 初始化代码
-    pass
-
-def _generate_new_provider(self, system_prompt, user_prompt):
-    # 生成代码
-    pass
-```
+1. 将字段信息保存为 CSV 文件到 `data/fields/` 目录
+2. CSV 需要包含 `Field` 和 `Description` 列
+3. 系统会自动加载并使用
 
 ### 自定义 Alpha 生成策略
 
-编辑 `run_alpha_miner.py` 中的 `generate_alphas()` 方法，修改 prompt 或添加新的生成逻辑。
+编辑 `run_alpha_miner.py` 中的方法：
+- `generate_alphas()` — 新因子生成
+- `generate_crossover_alphas()` — 基因重组
+- `_process_rescue_task()` — 挽救裂变
 
 ## 许可证
 

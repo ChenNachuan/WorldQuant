@@ -1,6 +1,5 @@
 """
 Alpha Database — SQLite-backed storage for all alpha backtesting results.
-Replaces JSON-based alpha_store for better performance, concurrency, and querying.
 """
 
 import sqlite3
@@ -13,15 +12,13 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from contextlib import contextmanager
 
-from .alpha_lifecycle import AlphaState, validate_transition
-
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join("data", "alphas.db")
 
 
 class AlphaDB:
-    """Thread-safe SQLite storage for alpha results with full query capabilities."""
+    """Thread-safe SQLite storage for alpha results."""
 
     _local = threading.local()
 
@@ -78,19 +75,13 @@ class AlphaDB:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
+
             # Upgrade existing DB with raw_json if it doesn't exist
             try:
                 cur.execute("ALTER TABLE alphas ADD COLUMN raw_json TEXT")
             except sqlite3.OperationalError:
                 pass  # Column already exists
 
-            # Upgrade: add lifecycle_state column
-            try:
-                cur.execute("ALTER TABLE alphas ADD COLUMN lifecycle_state TEXT DEFAULT 'simulated'")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
-                
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS active_simulations (
                     id TEXT PRIMARY KEY,
@@ -127,21 +118,50 @@ class AlphaDB:
             cur.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_alpha_expr_settings ON alphas(expression, region, universe, neutralization)"
             )
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS dpo_pairs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    prompt TEXT NOT NULL,
-                    chosen TEXT,
-                    rejected TEXT,
-                    model_name TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_error_type ON errors(error_type)"
             )
 
     # ── Write operations ─────────────────────────────────────────────
+
+    def add_alpha(
+        self,
+        expression: str,
+        sharpe: float = None,
+        fitness: float = None,
+        alpha_id: str = "",
+        turnover: float = None,
+        margin: float = None,
+        source: str = "pipeline",
+        region: str = "USA",
+        universe: str = "TOP3000",
+        neutralization: str = "NONE",
+    ) -> int:
+        """Save an alpha result. Returns the row ID."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO alphas (
+                    expression, alpha_id, fitness, sharpe, turnover,
+                    margin, source, region, universe, neutralization,
+                    status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(expression, region, universe, neutralization) DO UPDATE SET
+                    fitness=excluded.fitness,
+                    sharpe=excluded.sharpe,
+                    turnover=excluded.turnover,
+                    margin=excluded.margin,
+                    alpha_id=excluded.alpha_id,
+                    status=excluded.status,
+                    created_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    expression, alpha_id, fitness, sharpe,
+                    turnover, margin, source, region, universe,
+                    neutralization, "tested"
+                ),
+            )
+            return int(cur.lastrowid or 0)
 
     def save_alpha(
         self,
@@ -150,7 +170,7 @@ class AlphaDB:
         source: str = "pipeline",
         settings: Dict = None,
     ) -> int:
-        """Save an alpha result. Returns the row ID. Upserts on duplicate expression+region."""
+        """Save an alpha result from API response. Returns the row ID."""
         is_data = alpha_data.get("is", {})
         api_settings = alpha_data.get("settings", {})
         if settings is None:
@@ -158,58 +178,18 @@ class AlphaDB:
 
         region = settings.get("region", "USA")
 
-        with self._cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO alphas (
-                    expression, alpha_id, fitness, sharpe, turnover,
-                    returns, margin, long_count, short_count, grade,
-                    source, region, universe, delay, decay,
-                    neutralization, truncation, status, checks, raw_json,
-                    lifecycle_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(expression, region, universe, neutralization) DO UPDATE SET
-                    fitness=excluded.fitness,
-                    sharpe=excluded.sharpe,
-                    turnover=excluded.turnover,
-                    returns=excluded.returns,
-                    alpha_id=excluded.alpha_id,
-                    grade=excluded.grade,
-                    status=excluded.status,
-                    checks=excluded.checks,
-                    raw_json=excluded.raw_json,
-                    lifecycle_state=CASE
-                        WHEN alphas.lifecycle_state IN ('submitted', 'checked')
-                        THEN alphas.lifecycle_state
-                        ELSE excluded.lifecycle_state
-                    END,
-                    created_at=CURRENT_TIMESTAMP
-                """,
-                (
-                    expression,
-                    alpha_data.get("id", ""),
-                    is_data.get("fitness"),
-                    is_data.get("sharpe"),
-                    is_data.get("turnover"),
-                    is_data.get("returns"),
-                    is_data.get("margin"),
-                    is_data.get("longCount"),
-                    is_data.get("shortCount"),
-                    alpha_data.get("grade", is_data.get("grade", "")),
-                    source,
-                    region,
-                    settings.get("universe", "TOP3000"),
-                    settings.get("delay", 1),
-                    settings.get("decay", 0),
-                    settings.get("neutralization", "INDUSTRY"),
-                    settings.get("truncation", 0.01),
-                    alpha_data.get("status", "tested"),
-                    json.dumps(is_data.get("checks", [])),
-                    json.dumps(alpha_data),
-                    AlphaState.SIMULATED.value,  # first insert = just simulated
-                ),
-            )
-            return int(cur.lastrowid or 0)
+        return self.add_alpha(
+            expression=expression,
+            sharpe=is_data.get("sharpe"),
+            fitness=is_data.get("fitness"),
+            alpha_id=alpha_data.get("id", ""),
+            turnover=is_data.get("turnover"),
+            margin=is_data.get("margin"),
+            source=source,
+            region=region,
+            universe=settings.get("universe", "TOP3000"),
+            neutralization=settings.get("neutralization", "INDUSTRY"),
+        )
 
     def save_error(
         self,
@@ -231,24 +211,6 @@ class AlphaDB:
             )
             return int(cur.lastrowid or 0)
 
-    def save_dpo_pair(
-        self,
-        prompt: str,
-        chosen: str = "",
-        rejected: str = "",
-        model_name: str = None
-    ) -> int:
-        """Save a preference pair for future LLM fine-tuning."""
-        with self._cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO dpo_pairs (prompt, chosen, rejected, model_name)
-                VALUES (?, ?, ?, ?)
-                """,
-                (prompt, chosen, rejected, model_name),
-            )
-            return int(cur.lastrowid or 0)
-
     # ── Concurrency operations ───────────────────────────────────────
 
     def acquire_global_slot(self, sim_id: str, max_concurrent: int = 4, timeout: float = 300.0) -> bool:
@@ -260,7 +222,7 @@ class AlphaDB:
                 with self._cursor() as cur:
                     # Clean up extremely old zombies (> 1 hour)
                     cur.execute("DELETE FROM active_simulations WHERE start_time < ?", (time.time() - 3600,))
-                    
+
                     cur.execute("SELECT COUNT(*) FROM active_simulations")
                     count = cur.fetchone()[0]
                     if count < max_concurrent:
@@ -374,11 +336,10 @@ class AlphaDB:
             cur.execute(query, tuple(params))
             return cur.rowcount
 
-    # ── Analytics / Retrospect ───────────────────────────────────────
+    # ── Analytics ────────────────────────────────────────────────────
 
     def get_operator_stats(self, days: int = 7) -> List[Dict]:
         """Get operator performance statistics."""
-        since = (datetime.now() - timedelta(days=days)).isoformat()
         alphas = self.get_top_alphas(limit=500, days=days)
 
         import re
@@ -459,7 +420,7 @@ class AlphaDB:
             return [dict(row) for row in cur.fetchall()]
 
     def get_error_stats(self, days: int = 7) -> List[Dict]:
-        """Get error type statistics for self-correction learning."""
+        """Get error type statistics."""
         since = (datetime.now() - timedelta(days=days)).isoformat()
         with self._cursor() as cur:
             cur.execute(
@@ -490,133 +451,6 @@ class AlphaDB:
             "successful_alphas": len(self.get_successful_alphas()),
         }
 
-    # ── Lifecycle State Management ──────────────────────────────────
-
-    def transition_state(
-        self,
-        expression: str,
-        new_state: AlphaState,
-        *,
-        region: str = "USA",
-        universe: str = "TOP3000",
-        neutralization: str = "INDUSTRY",
-    ) -> bool:
-        """Transition an alpha to a new lifecycle state with validation."""
-        current = self.get_lifecycle_state(
-            expression, region=region, universe=universe,
-            neutralization=neutralization,
-        )
-        validate_transition(current, new_state)
-
-        with self._cursor() as cur:
-            cur.execute(
-                """UPDATE alphas SET lifecycle_state = ?
-                   WHERE expression = ? AND region = ?
-                     AND universe = ? AND neutralization = ?""",
-                (new_state.value, expression, region, universe, neutralization),
-            )
-            return cur.rowcount > 0
-
-    def get_lifecycle_state(
-        self,
-        expression: str,
-        *,
-        region: str = "USA",
-        universe: str = "TOP3000",
-        neutralization: str = "INDUSTRY",
-    ) -> AlphaState:
-        """Get the current lifecycle state of an alpha."""
-        with self._cursor() as cur:
-            cur.execute(
-                """SELECT lifecycle_state FROM alphas
-                   WHERE expression = ? AND region = ?
-                     AND universe = ? AND neutralization = ?""",
-                (expression, region, universe, neutralization),
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                return AlphaState(row[0])
-            return AlphaState.SIMULATED  # default for backwards compat
-
-    def get_alphas_by_state(
-        self, state: AlphaState, limit: int = 100
-    ) -> List[Dict]:
-        """Query alphas by lifecycle state, ordered by fitness DESC."""
-        with self._cursor() as cur:
-            cur.execute(
-                """SELECT * FROM alphas WHERE lifecycle_state = ?
-                   ORDER BY fitness DESC LIMIT ?""",
-                (state.value, limit),
-            )
-            return [dict(row) for row in cur.fetchall()]
-
-    def count_by_state(self, state: Optional[AlphaState] = None) -> int:
-        """Count alphas by lifecycle state, or all if state is None."""
-        with self._cursor() as cur:
-            if state:
-                cur.execute(
-                    "SELECT COUNT(*) FROM alphas WHERE lifecycle_state = ?",
-                    (state.value,),
-                )
-            else:
-                cur.execute("SELECT COUNT(*) FROM alphas")
-            row = cur.fetchone()
-            return int(row[0]) if row else 0
-
-    def mark_all_submitted_in_batch(self, alpha_ids: List[str]) -> int:
-        """Mark alphas as SUBMITTED by their WQ alpha_id."""
-        count = 0
-        with self._cursor() as cur:
-            for aid in alpha_ids:
-                cur.execute(
-                    """UPDATE alphas SET lifecycle_state = ?
-                       WHERE alpha_id = ?""",
-                    (AlphaState.SUBMITTED.value, aid),
-                )
-                count += cur.rowcount
-        return count
-
-    # ── Migration ────────────────────────────────────────────────────
-
-    def migrate_from_json(self, alpha_dir: str = "alpha") -> int:
-        """Migrate existing JSON alpha files into SQLite."""
-        if not os.path.exists(alpha_dir):
-            return 0
-
-        migrated = 0
-        for filename in sorted(os.listdir(alpha_dir)):
-            if not filename.endswith(".json"):
-                continue
-            filepath = os.path.join(alpha_dir, filename)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                for alpha in data.get("alphas", []):
-                    basic = alpha.get("basic", {})
-                    backtest = alpha.get("backtest", {})
-                    settings = alpha.get("settings", {})
-                    alpha_data = {
-                        "id": basic.get("alpha_id", ""),
-                        "grade": basic.get("grade", ""),
-                        "is": backtest,
-                        "settings": settings,
-                    }
-                    try:
-                        self.save_alpha(
-                            expression=basic.get("expression", ""),
-                            alpha_data=alpha_data,
-                            source=basic.get("source", "migration"),
-                            settings=settings,
-                        )
-                        migrated += 1
-                    except Exception as e:
-                        logger.debug(f"Skip duplicate during migration: {e}")
-            except Exception as e:
-                logger.warning(f"Error migrating {filepath}: {e}")
-
-        logger.info(f"Migrated {migrated} alphas from JSON to SQLite")
-        return migrated
-
 
 # ── Global singleton ─────────────────────────────────────────────────
 
@@ -628,6 +462,4 @@ def get_alpha_db(db_path: str = DB_PATH) -> AlphaDB:
     global _db_instance
     if _db_instance is None:
         _db_instance = AlphaDB(db_path)
-    instance = _db_instance
-    assert instance is not None
-    return instance
+    return _db_instance

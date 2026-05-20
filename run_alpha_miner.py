@@ -9,7 +9,9 @@ import os
 import sys
 import time
 import json
+import glob
 import queue
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional
@@ -32,15 +34,22 @@ logger = setup_logger(__name__, "alpha_miner")
 BASE_URL = "https://api.worldquantbrain.com"
 MIN_SHARPE = 1.25
 MIN_FITNESS = 1.0
+RESCUE_THRESHOLD = 1.7
+
+# Data directories
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+FIELDS_DIR = os.path.join(DATA_DIR, "fields")
+SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
 
 
 class AlphaMiner:
     """Main alpha mining engine with direct API approach."""
 
-    def __init__(self, llm_provider: str = "auto"):
+    def __init__(self, llm_provider: str = "auto", member_id: str = "default"):
         self.llm_client = get_llm_client(llm_provider)
         self.alpha_db = get_alpha_db()
         self.quota = get_submission_quota()
+        self.member_id = member_id
 
         # Session state
         self.session = None
@@ -56,8 +65,23 @@ class AlphaMiner:
             "passed": 0,
             "failed": 0,
             "rescued": 0,
+            "flipped": 0,
             "best_sharpe": -99.0
         }
+
+        # Dynamic module weights (reinforcement learning style)
+        self.module_stats = {
+            "PRICE&VOLUME": {"tried": 0, "success": 0},
+            "FUNDAMENTAL": {"tried": 0, "success": 0},
+            "ANALYST": {"tried": 0, "success": 0},
+            "SENTIMENT": {"tried": 0, "success": 0},
+            "OPTIONS": {"tried": 0, "success": 0}
+        }
+
+        # Create directories
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(FIELDS_DIR, exist_ok=True)
+        os.makedirs(SHARED_POOL_DIR, exist_ok=True)
 
     def authenticate(self) -> bool:
         """Authenticate with WorldQuant Brain API."""
@@ -91,19 +115,45 @@ class AlphaMiner:
             logger.error(f"Authentication error: {e}")
             return False
 
-    def generate_alphas(self, fields_data: Dict = None) -> List[Dict]:
-        """Generate alpha expressions using LLM."""
-        if not fields_data:
-            fields_data = self._get_default_fields()
+    # ==========================================
+    # Field Loading (from CSV files)
+    # ==========================================
 
-        prompt = f"""请利用以下提供的数据字段，进行模块内部或模块之间的交叉组合，
-生成 5 个具有爆发力的全新因子。必须使用真实的字段名。
+    def load_fields_from_csvs(self) -> Dict[str, List[Dict]]:
+        """Load field data from CSV files in the fields directory."""
+        import pandas as pd
 
-可用字段: {json.dumps(fields_data, ensure_ascii=False)}"""
+        selected_fields = {}
 
-        return self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
+        if not os.path.exists(FIELDS_DIR):
+            logger.info("Fields directory not found, using default fields")
+            return self._get_default_fields()
 
-    def _get_default_fields(self) -> Dict:
+        # Dynamically load all CSV files in the directory
+        for file in os.listdir(FIELDS_DIR):
+            if not file.endswith(".csv"):
+                continue
+
+            filepath = os.path.join(FIELDS_DIR, file)
+            try:
+                df = pd.read_csv(filepath)
+                # Get top 10 fields with Field and Description columns
+                if 'Field' in df.columns and 'Description' in df.columns:
+                    top_10 = df.head(10)[['Field', 'Description']].to_dict(orient='records')
+                    category = file.replace(".csv", "").upper()
+                    selected_fields[category] = top_10
+                    logger.info(f"Loaded {len(top_10)} fields from {file}")
+            except Exception as e:
+                logger.warning(f"Failed to load {file}: {e}")
+
+        # If no CSV files found, use defaults
+        if not selected_fields:
+            logger.info("No CSV files found, using default fields")
+            selected_fields = self._get_default_fields()
+
+        return selected_fields
+
+    def _get_default_fields(self) -> Dict[str, List[Dict]]:
         """Get default field data for alpha generation."""
         return {
             "PRICE&VOLUME": [
@@ -122,6 +172,152 @@ class AlphaMiner:
                 {"Field": "roe", "Description": "净资产收益率"}
             ]
         }
+
+    # ==========================================
+    # Dynamic Module Weights
+    # ==========================================
+
+    def get_dynamic_modules(self, fields_data: Dict) -> tuple:
+        """
+        Select 1-2 modules based on historical success rates.
+        Returns (selected_fields, modules_used)
+        """
+        # Check if we have enough data to use weighted selection
+        ready = all(stat['success'] >= 2 for stat in self.module_stats.values())
+        modules = list(self.module_stats.keys())
+
+        if not ready:
+            # Equal weights until we have enough data
+            weights = [1.0] * len(modules)
+        else:
+            # Calculate win rates, minimum 0.1 base weight
+            weights = [
+                max(0.1, stat['success'] / max(1, stat['tried']))
+                for stat in self.module_stats.values()
+            ]
+
+        # Select 1 or 2 modules
+        num_to_select = random.choice([1, 2])
+        selected = random.choices(modules, weights=weights, k=num_to_select)
+        selected = list(set(selected))  # Remove duplicates
+
+        # Get fields for selected modules
+        selected_fields = {mod: fields_data.get(mod, []) for mod in selected}
+
+        return selected_fields, selected
+
+    def record_module_stat(self, modules_used: List[str], success: bool):
+        """Record success/failure for module weight updates."""
+        for mod in modules_used:
+            if mod in self.module_stats:
+                self.module_stats[mod]['tried'] += 1
+                if success:
+                    self.module_stats[mod]['success'] += 1
+
+    # ==========================================
+    # Shared Pool Management
+    # ==========================================
+
+    def load_shared_pool(self) -> List[Dict]:
+        """Load and merge all shared pool files."""
+        combined_pool = []
+        search_pattern = os.path.join(SHARED_POOL_DIR, "shared_pool_*.json")
+
+        for file_path in glob.glob(search_pattern):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    combined_pool.extend(json.load(f))
+            except Exception:
+                continue
+
+        # Sort by Sharpe and keep top 500
+        combined_pool.sort(key=lambda x: x.get('sharpe', 0), reverse=True)
+        return combined_pool[:500]
+
+    def add_to_shared_pool(self, expression: str, sharpe: float, fitness: float, logic: str = ""):
+        """Add factor to member's shared pool file."""
+        my_pool_path = os.path.join(SHARED_POOL_DIR, f"shared_pool_{self.member_id}.json")
+
+        my_pool = []
+        if os.path.exists(my_pool_path):
+            try:
+                with open(my_pool_path, "r", encoding="utf-8") as f:
+                    my_pool = json.load(f)
+            except Exception:
+                pass
+
+        my_pool.append({
+            "expression": expression,
+            "sharpe": sharpe,
+            "fitness": fitness,
+            "logic": logic
+        })
+
+        # Sort and keep top 500
+        my_pool.sort(key=lambda x: x.get('sharpe', 0), reverse=True)
+        my_pool = my_pool[:500]
+
+        with open(my_pool_path, "w", encoding="utf-8") as f:
+            json.dump(my_pool, f, ensure_ascii=False, indent=2)
+
+    # ==========================================
+    # Alpha Generation
+    # ==========================================
+
+    def generate_alphas(self, fields_data: Dict = None) -> List[Dict]:
+        """Generate alpha expressions using LLM with dynamic module selection."""
+        if not fields_data:
+            fields_data = self.load_fields_from_csvs()
+
+        # Use dynamic module selection
+        target_fields, modules_used = self.get_dynamic_modules(fields_data)
+        mod_names = "+".join(modules_used)
+
+        logger.info(f"Generating alphas for modules: {mod_names}")
+
+        prompt = f"""请利用以下提供的数据字段，进行模块内部或模块之间的交叉组合，
+生成 5 个具有爆发力的全新因子。必须使用真实的字段名。
+
+可用字段: {json.dumps(target_fields, ensure_ascii=False)}"""
+
+        results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
+
+        # Tag results with modules used
+        for res in results:
+            res['modules_used'] = modules_used
+
+        return results
+
+    def generate_crossover_alphas(self) -> List[Dict]:
+        """Generate alphas by crossing over elite factors from shared pool."""
+        pool = self.load_shared_pool()
+
+        if len(pool) < 2:
+            logger.info("Not enough factors in shared pool for crossover")
+            return []
+
+        # Select 2 random elite parents
+        parents = random.sample(pool, 2)
+
+        logger.info("Generating crossover from elite parents...")
+
+        prompt = f"""请提取这两个精英因子的核心逻辑，创造 3 个逻辑杂交的新变种，
+必须保持 ts_decay_linear(group_neutralize(zscore(...))) 外壳不变。
+
+父A: {parents[0]['expression']}
+父B: {parents[1]['expression']}"""
+
+        results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
+
+        # Tag as crossover
+        for res in results:
+            res['modules_used'] = []  # Crossover doesn't count for module stats
+
+        return results
+
+    # ==========================================
+    # Simulation & Polling
+    # ==========================================
 
     def simulate_factor(self, factor: Dict) -> Dict:
         """Submit factor for backtesting and poll for results."""
@@ -252,13 +448,22 @@ class AlphaMiner:
             logger.error(f"Submit error: {e}")
             return False
 
-    def process_result(self, factor: Dict, result: Dict):
-        """Process simulation result and take action."""
+    # ==========================================
+    # Result Processing
+    # ==========================================
+
+    def process_result(self, factor: Dict, result: Dict) -> bool:
+        """
+        Process simulation result and take action.
+        Returns False if fatal error occurred.
+        """
         expression = factor.get("expression", "")
+        mod_used = factor.get("modules_used", [])
 
         if "error" in result:
             logger.error(f"Failed: {expression[:60]}... -> {result['error']}")
             self.stats["failed"] += 1
+            self.record_module_stat(mod_used, False)
 
             # Handle auth failure
             if result["error"] == "AUTH_FAILED":
@@ -274,15 +479,29 @@ class AlphaMiner:
         sharpe = result.get("sharpe", 0)
         fitness = result.get("fitness", 0)
         alpha_id = result.get("alpha_id")
+        turnover = result.get("turnover", 0)
+        margin = result.get("margin", 0)
 
-        logger.info(f"Result: S={sharpe:.2f} F={fitness:.2f} | {expression[:60]}...")
+        logger.info(
+            f"Result: S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f} M={margin:.2f} | "
+            f"{expression[:60]}..."
+        )
 
         # Update best sharpe
         if sharpe > self.stats["best_sharpe"]:
             self.stats["best_sharpe"] = sharpe
 
-        # Check if meets submission criteria
-        if sharpe >= MIN_SHARPE and fitness >= MIN_FITNESS:
+        # Check if meets submission criteria (Holy Grail)
+        is_holy_grail = (sharpe >= MIN_SHARPE and fitness >= MIN_FITNESS)
+        is_pool_worthy = is_holy_grail or (sharpe > 1.0 and fitness > 0.8)
+
+        if is_pool_worthy:
+            self.record_module_stat(mod_used, True)
+            self.add_to_shared_pool(expression, sharpe, fitness, factor.get("logic", ""))
+        else:
+            self.record_module_stat(mod_used, False)
+
+        if is_holy_grail:
             logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f}")
 
             # Check quota
@@ -302,8 +521,18 @@ class AlphaMiner:
             else:
                 logger.info("Daily submission quota reached")
 
+        # Reverse factor detection (Sharpe < -0.8)
+        elif sharpe < -0.8:
+            logger.info(f"Found reverse factor (S={sharpe:.2f}), flipping sign...")
+            self.stats["flipped"] += 1
+
+            # Create flipped version
+            flipped_factor = factor.copy()
+            flipped_factor['expression'] = f"-1 * ({expression})"
+            self.test_queue.put(flipped_factor)
+
         # Rescue mechanism for borderline alphas
-        elif (abs(sharpe) + abs(fitness)) > 1.7:
+        elif (abs(sharpe) + abs(fitness)) > RESCUE_THRESHOLD:
             logger.info(f"Rescuing borderline alpha: S={sharpe:.2f} F={fitness:.2f}")
             self.stats["rescued"] += 1
 
@@ -313,14 +542,19 @@ class AlphaMiner:
                 "expression": expression,
                 "sharpe": sharpe,
                 "fitness": fitness,
-                "turnover": result.get("turnover", 0),
-                "margin": result.get("margin", 0)
+                "turnover": turnover,
+                "margin": margin,
+                "modules_used": mod_used
             })
 
         self.stats["tested"] += 1
         return True
 
-    def llm_producer_worker(self):
+    # ==========================================
+    # LLM Producer Worker
+    # ==========================================
+
+    def llm_producer_worker(self, fields_data: Dict):
         """Background thread for LLM alpha generation."""
         logger.info("LLM producer thread started")
 
@@ -338,8 +572,15 @@ class AlphaMiner:
                         self._process_rescue_task(task)
                         continue
 
-                # Generate new alphas
-                alphas = self.generate_alphas()
+                # Decide between new generation and crossover
+                pool = self.load_shared_pool()
+                if len(pool) >= 2 and random.random() < 0.3:
+                    # 30% chance: Crossover from shared pool
+                    alphas = self.generate_crossover_alphas()
+                else:
+                    # 70% chance: Generate new alphas
+                    alphas = self.generate_alphas(fields_data)
+
                 for alpha in alphas:
                     if alpha.get("expression"):
                         self.test_queue.put(alpha)
@@ -357,18 +598,32 @@ class AlphaMiner:
         sharpe = task.get("sharpe", 0)
         fitness = task.get("fitness", 0)
 
-        prompt = f"""这个因子表现一般，请给出 3 种不同视角的变种，必须保持 ts_decay_linear(group_neutralize(zscore(...))) 外壳不变。
+        prompt = f"""这个因子阵亡了，请给出 3 种不同视角的抢救变种，
+必须保持 ts_decay_linear(group_neutralize(zscore(...))) 外壳不变。
 
 原代码: {expression}
-Sharpe: {sharpe:.2f}, Fitness: {fitness:.2f}
-Turnover: {task.get('turnover', 0):.2f}, Margin: {task.get('margin', 0):.2f}
+【尸检报告】
+- Sharpe: {sharpe:.2f}
+- Fitness: {fitness:.2f}
+- Turnover(换手率): {task.get('turnover', 0):.2f}
+- Margin: {task.get('margin', 0):.2f}
+
+【挽救建议】
+- 如果 turnover 较高，必须增加时序窗口长度
+- 如果表现平庸，尝试颠倒逻辑或使用不同算子
 
 请生成 3 个变种因子。"""
 
         variants = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
+
         for variant in variants:
             if variant.get("expression"):
+                variant['modules_used'] = task.get("modules_used", [])
                 self.test_queue.put(variant)
+
+    # ==========================================
+    # Main Execution Loop
+    # ==========================================
 
     def run(self, max_workers: int = 2):
         """Main execution loop."""
@@ -376,11 +631,16 @@ Turnover: {task.get('turnover', 0):.2f}, Margin: {task.get('margin', 0):.2f}
             logger.error("Failed to authenticate, exiting")
             return
 
+        # Load fields data
+        fields_data = self.load_fields_from_csvs()
+        logger.info(f"Loaded fields: {list(fields_data.keys())}")
+
         logger.info("Starting alpha miner...")
 
         # Start LLM producer thread
         producer = threading.Thread(
             target=self.llm_producer_worker,
+            args=(fields_data,),
             daemon=True
         )
         producer.start()
@@ -401,7 +661,8 @@ Turnover: {task.get('turnover', 0):.2f}, Margin: {task.get('margin', 0):.2f}
                             continue
                         self.tested_expressions.add(expression)
 
-                        logger.info(f"Testing: {expression[:60]}...")
+                        mod_str = "+".join(factor.get("modules_used", []))
+                        logger.info(f"Testing [{mod_str}]: {expression[:60]}...")
                         future = executor.submit(self.simulate_factor, factor)
                         running_tasks[future] = factor
 
@@ -409,12 +670,7 @@ Turnover: {task.get('turnover', 0):.2f}, Margin: {task.get('margin', 0):.2f}
                         time.sleep(1)
                         continue
 
-                    # Wait for any task to complete
-                    done, _ = as_completed(
-                        running_tasks.keys(),
-                        timeout=1.0
-                    ), None
-
+                    # Wait for tasks to complete
                     for future in list(running_tasks.keys()):
                         if future.done():
                             factor = running_tasks.pop(future)
@@ -427,13 +683,15 @@ Turnover: {task.get('turnover', 0):.2f}, Margin: {task.get('margin', 0):.2f}
                                 self.stats["failed"] += 1
 
                     # Print stats periodically
-                    if self.stats["tested"] % 10 == 0 and self.stats["tested"] > 0:
+                    if self.stats["tested"] % 15 == 0 and self.stats["tested"] > 0:
                         logger.info(
                             f"Stats: tested={self.stats['tested']} "
                             f"passed={self.stats['passed']} "
                             f"failed={self.stats['failed']} "
                             f"rescued={self.stats['rescued']} "
-                            f"best_sharpe={self.stats['best_sharpe']:.2f}"
+                            f"flipped={self.stats['flipped']} "
+                            f"best_sharpe={self.stats['best_sharpe']:.2f} | "
+                            f"Module weights: {self.module_stats}"
                         )
 
                 except KeyboardInterrupt:
@@ -461,9 +719,15 @@ def main():
         default=2,
         help="Number of concurrent simulation workers"
     )
+    parser.add_argument(
+        "--member-id",
+        type=str,
+        default="default",
+        help="Member ID for shared pool (prevents file conflicts in team)"
+    )
     args = parser.parse_args()
 
-    miner = AlphaMiner(llm_provider=args.llm)
+    miner = AlphaMiner(llm_provider=args.llm, member_id=args.member_id)
     miner.run(max_workers=args.workers)
 
 
