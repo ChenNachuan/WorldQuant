@@ -21,5 +21,8 @@ cache/
 # Alpha data (contains backtest results, may be large)
 alpha/
 
+# IDE config
+.idea/
+
 # Keep project config
 !.env.example
