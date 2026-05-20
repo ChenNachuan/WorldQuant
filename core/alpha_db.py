@@ -105,6 +105,21 @@ class AlphaDB:
                 "CREATE INDEX IF NOT EXISTS idx_alpha_created ON alphas(created_at)"
             )
 
+            # Rescue pool for borderline alphas
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS rescue_pool (
+                    alpha_id TEXT PRIMARY KEY,
+                    expression TEXT NOT NULL,
+                    sharpe REAL,
+                    fitness REAL,
+                    turnover REAL,
+                    failed_checks TEXT DEFAULT '[]',
+                    modules_used TEXT DEFAULT '[]',
+                    attempt_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
     # ── Write operations ─────────────────────────────────────────────
 
     def add_alpha(
@@ -301,6 +316,87 @@ class AlphaDB:
         with self._cursor() as cur:
             cur.execute("DELETE FROM alphas WHERE alpha_id = ?", (alpha_id,))
             return cur.rowcount
+
+    # ── Rescue Pool operations ───────────────────────────────────────
+
+    def add_to_rescue_pool(
+        self,
+        alpha_id: str,
+        expression: str,
+        sharpe: float = 0,
+        fitness: float = 0,
+        turnover: float = 0,
+        failed_checks: list = None,
+        modules_used: list = None,
+    ) -> int:
+        """Add a borderline alpha to rescue pool. Returns 1 if successful."""
+        checks_json = json.dumps(failed_checks) if failed_checks else "[]"
+        modules_json = json.dumps(modules_used) if modules_used else "[]"
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO rescue_pool (alpha_id, expression, sharpe, fitness, turnover, failed_checks, modules_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(alpha_id) DO UPDATE SET
+                    expression=excluded.expression,
+                    sharpe=excluded.sharpe,
+                    fitness=excluded.fitness,
+                    turnover=excluded.turnover,
+                    failed_checks=excluded.failed_checks,
+                    modules_used=excluded.modules_used,
+                    attempt_count=0,
+                    created_at=CURRENT_TIMESTAMP
+                """,
+                (alpha_id, expression, sharpe, fitness, turnover, checks_json, modules_json),
+            )
+            return 1
+
+    def get_rescue_candidate(self) -> Optional[Dict]:
+        """Get a rescue candidate with attempt_count < 3. Returns None if pool is empty."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM rescue_pool
+                WHERE attempt_count < 3
+                ORDER BY sharpe DESC, fitness DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if row:
+                result = dict(row)
+                # Parse JSON fields
+                result["failed_checks"] = json.loads(result.get("failed_checks", "[]"))
+                result["modules_used"] = json.loads(result.get("modules_used", "[]"))
+                return result
+            return None
+
+    def increment_rescue_attempt(self, alpha_id: str) -> int:
+        """Increment attempt_count for a rescue candidate. Returns number of rows updated."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE rescue_pool SET attempt_count = attempt_count + 1 WHERE alpha_id = ?",
+                (alpha_id,),
+            )
+            return cur.rowcount
+
+    def delete_from_rescue_pool(self, alpha_id: str) -> int:
+        """Delete alpha from rescue pool. Returns number of rows deleted."""
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM rescue_pool WHERE alpha_id = ?", (alpha_id,))
+            return cur.rowcount
+
+    def cleanup_rescue_pool(self) -> int:
+        """Delete all rescue candidates with attempt_count >= 3. Returns number of rows deleted."""
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM rescue_pool WHERE attempt_count >= 3")
+            return cur.rowcount
+
+    def count_rescue_pool(self) -> int:
+        """Count rescue candidates with attempt_count < 3."""
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM rescue_pool WHERE attempt_count < 3")
+            return cur.fetchone()[0]
 
     # ── Analytics ────────────────────────────────────────────────────
 

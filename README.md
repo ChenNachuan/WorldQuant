@@ -6,10 +6,11 @@
 
 - **双 LLM 支持** — 同时支持 DeepSeek API 和本地 Ollama 模型
 - **动态赛道权重** — 强化学习风格的模块选择，按成功率动态调整
-- **基因重组** — 30% 概率从共享池提取精英因子进行杂交
+- **非线性基因重组** — 20% 概率从共享池提取精英因子，使用 ts_corr、ts_cov、rank 等非线性算子杂交，避免相关性检测失败
+- **参数调优** — 检查失败时自动尝试 4 组代表性参数组合（中性化、截断、衰减）
+- **智能挽救池** — 边界因子自动进入挽救池，针对性修复失败检查，最多尝试 3 次
 - **反向因子检测** — Sharpe < -0.8 时自动加负号重测
 - **共享因子池** — 支持团队协作，防冲突的分布式因子池
-- **智能挽救机制** — 边界因子自动变种优化
 - **严格筛选** — 只保存符合条件的因子（Sharpe ≥ 1.25, Fitness ≥ 1.0, 所有 checks 通过）
 - **手动提交** — 不自动提交，通过独立脚本手动控制提交
 
@@ -154,13 +155,14 @@ WorldQuant/
 
 ### 2. 动态模块选择
 
-系统维护 4 个模块的统计数据：
+系统维护 5 个模块的统计数据：
 ```python
 MODULE_STATS = {
     "PRICE&VOLUME": {"tried": 0, "success": 0},
     "FUNDAMENTAL": {"tried": 0, "success": 0},
     "ANALYST": {"tried": 0, "success": 0},
-    "SENTIMENT": {"tried": 0, "success": 0}
+    "SENTIMENT": {"tried": 0, "success": 0},
+    "MODEL": {"tried": 0, "success": 0}
 }
 ```
 
@@ -171,28 +173,44 @@ MODULE_STATS = {
 
 ### 3. Alpha 生成策略
 
-**新开采 (70% 概率)**
+**新开采 (60% 概率)**
 - 根据动态权重选择模块
 - 从选中模块的字段中生成因子
 
-**基因重组 (30% 概率)**
+**非线性基因重组 (20% 概率)**
 - 从共享池中随机选择 2 个精英因子
-- 提取核心逻辑进行杂交
-- 生成 3 个新变种
+- 提取核心逻辑，使用非线性算子杂交：
+  - `ts_corr(A, B, d)` — 时序相关性
+  - `ts_cov(A, B, d)` — 时序协方差
+  - `rank(A) / rank(B)` — 排名比值
+  - `sign(A) * abs(B)` — 符号组合
+- 重新套上外壳 `ts_decay_linear(zscore(...), 5)`，生成 3 个新变种
+- 中性化由 settings 控制（默认 INDUSTRY）
 
-**挽救裂变 (优先级最高)**
-- 对失败但有潜力的因子（|Sharpe| + |Fitness| > 1.7）
-- 生成 3 个变种进行优化
+**挽救池 (20% 概率)**
+- 从挽救池中提取边界因子
+- 针对失败检查生成修复变种：
+  - Turnover 过高 → 加大窗口参数
+  - Self-Correlation 失败 → 改变中性化方式
+  - Drawdown 过大 → 增加衰减平滑
+- 最多尝试 3 次，失败则删除
 
 ### 4. 结果处理
 
 | 条件 | 动作 |
 |------|------|
 | Sharpe ≥ 1.25 且 Fitness ≥ 1.0 且所有 checks 通过 | 保存到数据库（unsubmitted） |
+| Sharpe ≥ 1.25 且 Fitness ≥ 1.0 但 checks 失败 | 参数调优 → 失败则进入挽救池 |
 | Sharpe > 1.0 且 Fitness > 0.8 | 加入共享池 |
 | Sharpe < -0.8 | 加负号重测（反向因子） |
-| abs(Sharpe) + abs(Fitness) > 1.7 | 触发挽救机制 |
+| abs(Sharpe) + abs(Fitness) > 1.7 | 进入挽救池 |
 | 其他 | 记录失败，更新模块权重 |
+
+**参数调优流程**：
+1. 检查失败时，尝试 4 组代表性参数组合
+2. 参数组合包括不同的中性化方式（INDUSTRY/SUBINDUSTRY/SECTOR/MARKET）
+3. 任一组合通过 → 保存到数据库
+4. 全部失败 → 进入挽救池
 
 ### 5. 数据库状态
 
@@ -335,11 +353,16 @@ python run_alpha_miner.py --member-id bob
 
 ### 数据库结构
 
-数据库使用 (expression, region, universe, neutralization) 作为主键，没有自增 ID 列。
+**alphas 表**：存储符合条件的因子
+- 主键：(expression, region, universe, neutralization)
+- 状态值：
+  - `unsubmitted` — 符合条件但未提交
+  - `submitted` — 已成功提交
 
-状态值：
-- `unsubmitted` — 符合条件但未提交
-- `submitted` — 已成功提交
+**rescue_pool 表**：存储需要挽救的边界因子
+- 主键：alpha_id（WorldQuant 分配的唯一 ID）
+- attempt_count：挽救尝试次数，最多 3 次
+- failed_checks：失败的检查项，用于针对性修复
 
 ## 许可证
 

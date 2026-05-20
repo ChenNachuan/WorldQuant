@@ -37,6 +37,42 @@ MIN_SHARPE = 1.25
 MIN_FITNESS = 1.0
 RESCUE_THRESHOLD = 1.7
 
+# Parameter sweep settings for check failures
+SETTINGS_SWEEP = [
+    {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 5, "delay": 1},
+    {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 10, "delay": 1},
+    {"neutralization": "SECTOR", "truncation": 0.08, "decay": 20, "delay": 0},
+    {"neutralization": "MARKET", "truncation": 0.2, "decay": 40, "delay": 1},
+]
+
+# Check failure strategies
+CHECK_STRATEGIES = {
+    "TURNOVER": {
+        "description": "换手率过高",
+        "suggestions": [
+            "加大时序平滑窗口: ts_mean(x, 10) → ts_mean(x, 20)",
+            "增加衰减: ts_decay_linear(x, 5) → ts_decay_linear(x, 10)",
+            "使用 ts_rank 替换 zscore 降低换手"
+        ]
+    },
+    "SELF_CORRELATION": {
+        "description": "自相关性过高",
+        "suggestions": [
+            "在settings中改变neutralization: INDUSTRY → SUBINDUSTRY/SECTOR/MARKET",
+            "增加截断: truncation=0.08 → truncation=0.15",
+            "使用 ts_corr(x, adv20, 20) 引入成交量因子"
+        ]
+    },
+    "DRAWDOWN": {
+        "description": "回撤过大",
+        "suggestions": [
+            "使用 ts_max(x, 60) 限制最大回撤",
+            "增加衰减平滑: ts_decay_linear(x, 20)",
+            "使用 -1 * x 翻转信号方向"
+        ]
+    }
+}
+
 # Data directories
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 FIELDS_DIR = os.path.join(DATA_DIR, "fields")
@@ -78,6 +114,7 @@ class AlphaMiner:
             "failed": 0,
             "rescued": 0,
             "flipped": 0,
+            "rescue_pool": 0,
             "best_sharpe": -99.0
         }
 
@@ -333,7 +370,7 @@ class AlphaMiner:
         return results
 
     def generate_crossover_alphas(self) -> List[Dict]:
-        """Generate alphas by crossing over elite factors from shared pool."""
+        """Generate alphas by crossing over elite factors from shared pool using non-linear operations."""
         pool = self.load_shared_pool()
 
         if len(pool) < 2:
@@ -343,12 +380,28 @@ class AlphaMiner:
         # Select 2 random elite parents
         parents = random.sample(pool, 2)
 
-        logger.info("Generating crossover from elite parents...")
+        logger.info("Generating crossover from elite parents (non-linear)...")
 
-        prompt = f"""杂交以下两个因子，生成3个新变种，必须保持ts_decay_linear(group_neutralize(zscore(...)))外壳不变。
+        prompt = f"""两个已提交因子，禁止线性组合(无法通过相关性检测)。
 
+【操作步骤】
+1. 提取父因子的核心逻辑(去掉 ts_decay_linear(zscore(...)) 外壳)
+2. 使用以下非线性方式杂交：
+   - ts_corr(核心A, 核心B, d)：计算时序相关性
+   - ts_cov(核心A, 核心B, d)：计算时序协方差
+   - rank(核心A) / rank(核心B)：排名比值
+   - sign(核心A) * abs(核心B)：符号组合
+   - 交叉数据字段：保持父A结构，替换为父B的字段
+   - 更换算子：ts_mean↔ts_std_dev, ts_rank↔ts_zscore
+3. 重新套上外壳
+
+【父因子】
 父A: {parents[0]['expression']}
-父B: {parents[1]['expression']}"""
+父B: {parents[1]['expression']}
+
+【输出要求】
+输出3个变种，外壳必须为: ts_decay_linear(zscore(...), 5)
+中性化由settings控制，表达式中不要包含group_neutralize"""
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
 
@@ -378,7 +431,7 @@ class AlphaMiner:
             "universe": "TOP3000",
             "delay": 1,
             "decay": 0,
-            "neutralization": "NONE",
+            "neutralization": "INDUSTRY",
             "truncation": 0.08,
             "pasteurization": "ON",
             "unitHandling": "VERIFY",
@@ -579,6 +632,22 @@ class AlphaMiner:
                 logger.warning(f"Alpha {alpha_id} failed checks: {failed_checks}")
                 logger.warning(f"  Expression: {expression[:80]}...")
                 logger.warning(f"  S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f}")
+
+                # Try parameter sweep first
+                if self._try_parameter_sweep(alpha_id, expression, failed_checks):
+                    logger.info(f"Alpha {alpha_id} saved via parameter sweep")
+                else:
+                    # Parameter sweep failed, add to rescue pool
+                    logger.info(f"Adding alpha {alpha_id} to rescue pool")
+                    self.alpha_db.add_to_rescue_pool(
+                        alpha_id=alpha_id,
+                        expression=expression,
+                        sharpe=sharpe,
+                        fitness=fitness,
+                        turnover=turnover,
+                        failed_checks=failed_checks,
+                        modules_used=mod_used
+                    )
             else:
                 logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f} (unsubmitted)")
 
@@ -621,16 +690,17 @@ class AlphaMiner:
             logger.info(f"Rescuing borderline alpha: S={sharpe:.2f} F={fitness:.2f}")
             self.stats["rescued"] += 1
 
-            # Add rescue task to LLM queue
-            self.llm_task_queue.put({
-                "type": "RESCUE",
-                "expression": expression,
-                "sharpe": sharpe,
-                "fitness": fitness,
-                "turnover": turnover,
-                "margin": margin,
-                "modules_used": mod_used
-            })
+            # Add to rescue pool (will be picked up by rescue worker)
+            if alpha_id:
+                self.alpha_db.add_to_rescue_pool(
+                    alpha_id=alpha_id,
+                    expression=expression,
+                    sharpe=sharpe,
+                    fitness=fitness,
+                    turnover=turnover,
+                    failed_checks=[],
+                    modules_used=mod_used
+                )
 
         self.stats["tested"] += 1
         return True
@@ -650,21 +720,30 @@ class AlphaMiner:
                     time.sleep(3)
                     continue
 
-                # Process rescue tasks first
-                if not self.llm_task_queue.empty():
-                    task = self.llm_task_queue.get()
-                    if task.get("type") == "RESCUE":
-                        self._process_rescue_task(task)
-                        continue
+                # Clean up rescue pool periodically
+                self.alpha_db.cleanup_rescue_pool()
 
-                # Decide between new generation and crossover
-                pool = self.load_shared_pool()
-                if len(pool) >= 2 and random.random() < 0.3:
-                    # 30% chance: Crossover from shared pool
-                    alphas = self.generate_crossover_alphas()
-                else:
-                    # 70% chance: Generate new alphas
+                # Decide between new generation, crossover, and rescue
+                # 60% new generation, 20% crossover, 20% rescue
+                rand = random.random()
+
+                if rand < 0.6:
+                    # 60% chance: Generate new alphas
                     alphas = self.generate_alphas(fields_data)
+                elif rand < 0.8:
+                    # 20% chance: Crossover from shared pool
+                    pool = self.load_shared_pool()
+                    if len(pool) >= 2:
+                        alphas = self.generate_crossover_alphas()
+                    else:
+                        alphas = self.generate_alphas(fields_data)
+                else:
+                    # 20% chance: Rescue from rescue pool
+                    rescue_count = self.alpha_db.count_rescue_pool()
+                    if rescue_count > 0:
+                        alphas = self.generate_rescue_alphas()
+                    else:
+                        alphas = self.generate_alphas(fields_data)
 
                 for alpha in alphas:
                     if alpha.get("expression"):
@@ -677,18 +756,184 @@ class AlphaMiner:
                 logger.error(f"LLM producer error: {e}")
                 time.sleep(5)
 
+    def _try_parameter_sweep(self, alpha_id: str, expression: str, failed_checks: list) -> bool:
+        """
+        Try different parameter combinations to fix check failures.
+        Returns True if any combination passes all checks.
+        """
+        logger.info(f"Trying parameter sweep for alpha {alpha_id}...")
+
+        for i, settings in enumerate(SETTINGS_SWEEP):
+            logger.info(f"  Sweep {i+1}/{len(SETTINGS_SWEEP)}: {settings}")
+            result = self.simulate_factor({
+                "expression": expression,
+                "settings": settings
+            })
+
+            if "error" not in result:
+                checks = result.get("checks", [])
+                if not self._has_failed_checks(checks):
+                    # Success! Save to database
+                    logger.info(f"  Parameter sweep succeeded with: {settings}")
+                    self.alpha_db.add_alpha(
+                        expression=expression,
+                        alpha_id=result.get("alpha_id"),
+                        sharpe=result.get("sharpe"),
+                        fitness=result.get("fitness"),
+                        turnover=result.get("turnover"),
+                        margin=result.get("margin"),
+                        returns=result.get("returns", 0),
+                        long_count=result.get("long_count", 0),
+                        short_count=result.get("short_count", 0),
+                        drawdown=result.get("drawdown", 0),
+                        grade=result.get("grade", ""),
+                        checks=checks,
+                        source="pipeline",
+                        region=result.get("region", "USA"),
+                        universe=result.get("universe", "TOP3000"),
+                        delay=settings.get("delay", 1),
+                        decay=settings.get("decay", 0),
+                        neutralization=settings.get("neutralization", "NONE"),
+                        truncation=settings.get("truncation", 0.08),
+                        status="unsubmitted",
+                    )
+                    return True
+
+        logger.info(f"All parameter sweep combinations failed for alpha {alpha_id}")
+        return False
+
+    def _get_check_suggestions(self, failed_checks: list) -> str:
+        """Get targeted suggestions based on failed checks."""
+        suggestions = []
+        for check_name in failed_checks:
+            check_upper = check_name.upper()
+            for key, strategy in CHECK_STRATEGIES.items():
+                if key in check_upper:
+                    suggestions.append(f"【{strategy['description']}】")
+                    for s in strategy["suggestions"]:
+                        suggestions.append(f"  - {s}")
+                    break
+        return "\n".join(suggestions) if suggestions else "无特定建议，请尝试通用优化"
+
+    def generate_rescue_alphas(self) -> List[Dict]:
+        """Generate rescue alphas from rescue pool."""
+        candidate = self.alpha_db.get_rescue_candidate()
+        if not candidate:
+            return []
+
+        alpha_id = candidate["alpha_id"]
+        expression = candidate["expression"]
+        sharpe = candidate["sharpe"]
+        fitness = candidate["fitness"]
+        turnover = candidate["turnover"]
+        failed_checks = candidate.get("failed_checks", [])
+        modules_used = candidate.get("modules_used", [])
+
+        # Increment attempt count
+        self.alpha_db.increment_rescue_attempt(alpha_id)
+
+        # Determine rescue type based on failed checks
+        has_check_failures = len(failed_checks) > 0
+
+        if has_check_failures:
+            # Case B: Check failures - use targeted suggestions
+            check_suggestions = self._get_check_suggestions(failed_checks)
+            prompt = f"""因子检查失败，需要针对性修复。
+
+【当前状态】
+原代码: {expression}
+Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
+失败检查: {', '.join(failed_checks)}
+
+【针对性建议】
+{check_suggestions}
+
+【重要原则】
+- 只修改时序平滑参数，不要改变核心逻辑
+- 失败检查为 TURNOVER → 加大窗口 (10→20, 20→40)
+- 失败检查为 SELF_CORRELATION → 在settings中改变neutralization
+- 失败检查为 DRAWDOWN → 增加衰减平滑
+
+【输出要求】
+输出3个变种，外壳不变: ts_decay_linear(zscore(...), 5)
+中性化由settings控制，表达式中不要包含group_neutralize"""
+        else:
+            # Case A: Poor performance - general optimization
+            prompt = f"""因子表现接近达标，需要提升性能。
+
+【当前状态】
+原代码: {expression}
+Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
+
+【优化建议】
+1. 引入新的数据字段（如基本面、分析师、情绪数据）
+2. 更换核心算子：ts_mean↔ts_std_dev, ts_rank↔ts_zscore
+3. 调整时序窗口：5→10, 10→20
+4. 使用非线性变换：abs, log, sign, rank
+
+【输出要求】
+输出3个变种，外壳不变: ts_decay_linear(zscore(...), 5)
+中性化由settings控制，表达式中不要包含group_neutralize"""
+
+        results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
+
+        # Tag as rescue
+        for res in results:
+            res['modules_used'] = modules_used
+
+        logger.info(f"Generated {len(results)} rescue variants for alpha {alpha_id} (attempt {candidate['attempt_count'] + 1})")
+        return results
+
     def _process_rescue_task(self, task: Dict):
         """Process a rescue task - generate variants of borderline alpha."""
         expression = task.get("expression", "")
         sharpe = task.get("sharpe", 0)
         fitness = task.get("fitness", 0)
+        turnover = task.get("turnover", 0)
+        failed_checks = task.get("failed_checks", [])
 
-        turnover = task.get('turnover', 0)
-        prompt = f"""因子失败，生成3个变种，必须保持ts_decay_linear(group_neutralize(zscore(...)))外壳不变。
+        # Determine rescue type
+        has_check_failures = len(failed_checks) > 0
 
+        if has_check_failures:
+            # Case B: Check failures - use targeted suggestions
+            check_suggestions = self._get_check_suggestions(failed_checks)
+            prompt = f"""因子检查失败，需要针对性修复。
+
+【当前状态】
 原代码: {expression}
 Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
-建议: turnover高则加大窗口，表现平庸则颠倒逻辑或换算子"""
+失败检查: {', '.join(failed_checks)}
+
+【针对性建议】
+{check_suggestions}
+
+【重要原则】
+- 只修改时序平滑参数，不要改变核心逻辑
+- 失败检查为 TURNOVER → 加大窗口 (10→20, 20→40)
+- 失败检查为 SELF_CORRELATION → 在settings中改变neutralization
+- 失败检查为 DRAWDOWN → 增加衰减平滑
+
+【输出要求】
+输出3个变种，外壳不变: ts_decay_linear(zscore(...), 5)
+中性化由settings控制，表达式中不要包含group_neutralize"""
+        else:
+            # Case A: Poor performance - general optimization
+            prompt = f"""因子表现接近达标，需要提升性能。
+
+【当前状态】
+原代码: {expression}
+Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
+
+【优化建议】
+1. 引入新的数据字段（如基本面、分析师、情绪数据）
+2. 更换核心算子：ts_mean↔ts_std_dev, ts_rank↔ts_zscore
+3. 调整时序窗口：5→10, 10→20
+4. 使用非线性变换：abs, log, sign, rank
+
+【输出要求】
+输出3个变种，外壳不变: ts_decay_linear(zscore(...), 5)
+中性化由settings控制，表达式中不要包含group_neutralize"""
 
         variants = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
 
@@ -764,12 +1009,14 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
 
                     # Print stats periodically
                     if self.stats["tested"] % 15 == 0 and self.stats["tested"] > 0:
+                        rescue_count = self.alpha_db.count_rescue_pool()
                         logger.info(
                             f"Stats: tested={self.stats['tested']} "
                             f"passed={self.stats['passed']} "
                             f"failed={self.stats['failed']} "
                             f"rescued={self.stats['rescued']} "
                             f"flipped={self.stats['flipped']} "
+                            f"rescue_pool={rescue_count} "
                             f"best_sharpe={self.stats['best_sharpe']:.2f} | "
                             f"Module weights: {self.module_stats}"
                         )
