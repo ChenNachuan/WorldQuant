@@ -10,6 +10,8 @@
 - **反向因子检测** — Sharpe < -0.8 时自动加负号重测
 - **共享因子池** — 支持团队协作，防冲突的分布式因子池
 - **智能挽救机制** — 边界因子自动变种优化
+- **严格筛选** — 只保存符合条件的因子（Sharpe ≥ 1.25, Fitness ≥ 1.0, 所有 checks 通过）
+- **手动提交** — 不自动提交，通过独立脚本手动控制提交
 
 ## 系统要求
 
@@ -72,7 +74,7 @@ low,最低价
 volume,成交量" > data/fields/price.csv
 ```
 
-### 5. 启动系统
+### 5. 启动挖掘
 
 ```bash
 # 使用 DeepSeek API（默认）
@@ -89,6 +91,29 @@ python run_alpha_miner.py --member-id gao
 python run_alpha_miner.py --workers 3
 ```
 
+### 6. 提交因子
+
+挖掘出的因子会自动保存到数据库（状态为 "unsubmitted"），使用以下命令提交：
+
+```bash
+# 提交单个因子
+python submit_alpha.py <alpha_id>
+
+# 提交多个因子
+python submit_alpha.py pwnbR9Gq akNmojM1
+```
+
+提交时会检查所有条件，失败会显示详细原因并从数据库删除。
+
+### 7. 手动添加因子
+
+从 WorldQuant Brain 添加已知因子到数据库：
+
+```bash
+python add_alpha.py <alpha_id>
+python add_alpha.py pwnbR9Gq akNmojM1
+```
+
 ## 项目结构
 
 ```
@@ -98,23 +123,21 @@ WorldQuant/
 │   ├── api_session.py             # API 会话管理
 │   ├── alpha_db.py                # SQLite Alpha 数据库
 │   ├── llm_client.py              # 统一 LLM 客户端（Ollama + DeepSeek）
-│   ├── data_fetcher.py            # WQ 数据字段获取器
 │   ├── submission_quota.py        # 每日提交配额追踪
 │   └── log_manager.py             # 日志管理
 ├── data/                          # 运行时数据
 │   ├── fields/                    # 数据字段 CSV（按类别分组）
-│   │   ├── price.csv
-│   │   ├── volume.csv
+│   │   ├── price&volume.csv
 │   │   ├── fundamental.csv
 │   │   ├── analyst.csv
-│   │   ├── sentiment.csv
-│   │   └── options.csv
+│   │   └── sentiment.csv
 │   ├── operators/                 # 运算符数据
 │   │   └── operators.csv
 │   └── shared_pool/               # 共享因子池（团队协作）
-├── run_alpha_miner.py             # 主程序
+├── run_alpha_miner.py             # 主挖掘程序
+├── submit_alpha.py                # 因子提交脚本
+├── add_alpha.py                   # 手动添加因子脚本
 ├── fetch_fields.py                # 字段获取脚本
-├── IQC_final.ipynb                # 参考实现
 ├── .env.example                   # 环境变量示例
 └── README.md                      # 本文件
 ```
@@ -128,18 +151,16 @@ WorldQuant/
 - `fundamental.csv` — 基本面字段
 - `analyst.csv` — 分析师数据
 - `sentiment.csv` — 情绪指标
-- `options.csv` — 期权数据
 
 ### 2. 动态模块选择
 
-系统维护 5 个模块的统计数据：
+系统维护 4 个模块的统计数据：
 ```python
 MODULE_STATS = {
     "PRICE&VOLUME": {"tried": 0, "success": 0},
     "FUNDAMENTAL": {"tried": 0, "success": 0},
     "ANALYST": {"tried": 0, "success": 0},
-    "SENTIMENT": {"tried": 0, "success": 0},
-    "OPTIONS": {"tried": 0, "success": 0}
+    "SENTIMENT": {"tried": 0, "success": 0}
 }
 ```
 
@@ -167,13 +188,24 @@ MODULE_STATS = {
 
 | 条件 | 动作 |
 |------|------|
-| Sharpe ≥ 1.25 且 Fitness ≥ 1.0 | 自动提交（圣杯） |
+| Sharpe ≥ 1.25 且 Fitness ≥ 1.0 且所有 checks 通过 | 保存到数据库（unsubmitted） |
 | Sharpe > 1.0 且 Fitness > 0.8 | 加入共享池 |
 | Sharpe < -0.8 | 加负号重测（反向因子） |
 | abs(Sharpe) + abs(Fitness) > 1.7 | 触发挽救机制 |
 | 其他 | 记录失败，更新模块权重 |
 
-### 5. 共享因子池
+### 5. 数据库状态
+
+因子保存到数据库时的状态：
+- `unsubmitted` — 符合条件但未提交
+- `submitted` — 已成功提交到平台
+
+提交时会进行最终验证：
+- 检查 SELF_CORRELATION（相关性）
+- 检查其他所有 checks
+- 任何 check 失败都会显示详细原因并从数据库删除
+
+### 6. 共享因子池
 
 团队协作功能：
 - 每个成员有独立的 JSON 文件：`shared_pool_{member_id}.json`
@@ -190,6 +222,22 @@ MODULE_STATS = {
 | `--llm` | `auto` | LLM 提供商：`auto`, `deepseek`, `ollama` |
 | `--workers` | `2` | 并发模拟 worker 数量 |
 | `--member-id` | `default` | 成员 ID（团队协作时使用） |
+
+### submit_alpha.py
+
+```bash
+python submit_alpha.py <alpha_id> [alpha_id2 ...]
+```
+
+提交因子到 WorldQuant Brain，失败会显示详细原因并从数据库删除。
+
+### add_alpha.py
+
+```bash
+python add_alpha.py <alpha_id> [alpha_id2 ...]
+```
+
+从 WorldQuant Brain 获取因子信息并添加到数据库（状态为 "submitted"）。
 
 ### fetch_fields.py
 
@@ -265,6 +313,11 @@ python run_alpha_miner.py --member-id bob
 - 默认 10 分钟超时
 - 超时后模拟标记为失败，继续下一个
 
+### 提交失败
+- 提交时会检查所有条件
+- 失败会显示详细原因（如 SELF_CORRELATION 失败）
+- 失败的因子会自动从数据库删除
+
 ## 开发说明
 
 ### 添加新的数据字段
@@ -279,6 +332,14 @@ python run_alpha_miner.py --member-id bob
 - `generate_alphas()` — 新因子生成
 - `generate_crossover_alphas()` — 基因重组
 - `_process_rescue_task()` — 挽救裂变
+
+### 数据库结构
+
+数据库使用 (expression, region, universe, neutralization) 作为主键，没有自增 ID 列。
+
+状态值：
+- `unsubmitted` — 符合条件但未提交
+- `submitted` — 已成功提交
 
 ## 许可证
 

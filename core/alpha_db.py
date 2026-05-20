@@ -51,9 +51,10 @@ class AlphaDB:
         with self._cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS alphas (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    expression TEXT NOT NULL,
                     alpha_id TEXT,
+                    status TEXT DEFAULT 'tested',
+                    grade TEXT,
+                    expression TEXT NOT NULL,
                     fitness REAL,
                     sharpe REAL,
                     turnover REAL,
@@ -63,7 +64,6 @@ class AlphaDB:
                     long_count INTEGER,
                     short_count INTEGER,
                     drawdown REAL,
-                    grade TEXT,
                     source TEXT DEFAULT 'pipeline',
                     region TEXT DEFAULT 'USA',
                     universe TEXT DEFAULT 'TOP3000',
@@ -71,10 +71,10 @@ class AlphaDB:
                     decay INTEGER DEFAULT 0,
                     neutralization TEXT DEFAULT 'INDUSTRY',
                     truncation REAL DEFAULT 0.08,
-                    status TEXT DEFAULT 'tested',
                     checks TEXT DEFAULT '[]',
                     raw_json TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (expression, region, universe, neutralization)
                 )
             """)
 
@@ -104,12 +104,6 @@ class AlphaDB:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_alpha_created ON alphas(created_at)"
             )
-            # Drop old index if it exists
-            cur.execute("DROP INDEX IF EXISTS idx_alpha_expr")
-            # Create new composite index
-            cur.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alpha_expr_settings ON alphas(expression, region, universe, neutralization)"
-            )
 
     # ── Write operations ─────────────────────────────────────────────
 
@@ -138,7 +132,7 @@ class AlphaDB:
         raw_json: str = None,
         status: str = "tested",
     ) -> int:
-        """Save an alpha result. Returns the row ID."""
+        """Save an alpha result. Returns 1 if successful."""
         checks_json = json.dumps(checks) if checks else "[]"
         with self._cursor() as cur:
             cur.execute(
@@ -176,7 +170,7 @@ class AlphaDB:
                     delay, decay, neutralization, truncation, raw_json, status
                 ),
             )
-            return int(cur.lastrowid or 0)
+            return 1
 
     def save_alpha(
         self,
@@ -294,6 +288,18 @@ class AlphaDB:
                 params.append(neutralization)
 
             cur.execute(query, tuple(params))
+            return cur.rowcount
+
+    def update_alpha_status(self, alpha_id: str, status: str) -> int:
+        """Update alpha status by alpha_id. Returns number of rows updated."""
+        with self._cursor() as cur:
+            cur.execute("UPDATE alphas SET status = ? WHERE alpha_id = ?", (status, alpha_id))
+            return cur.rowcount
+
+    def delete_alpha_by_alpha_id(self, alpha_id: str) -> int:
+        """Delete alpha by alpha_id. Returns number of rows deleted."""
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM alphas WHERE alpha_id = ?", (alpha_id,))
             return cur.rowcount
 
     # ── Analytics ────────────────────────────────────────────────────

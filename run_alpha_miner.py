@@ -514,6 +514,12 @@ class AlphaMiner:
     # Result Processing
     # ==========================================
 
+    def _has_failed_checks(self, checks: list) -> bool:
+        """Check if any checks have FAILED status."""
+        if not checks:
+            return False
+        return any(check.get("result") == "FAIL" for check in checks)
+
     def process_result(self, factor: Dict, result: Dict) -> bool:
         """
         Process simulation result and take action.
@@ -563,54 +569,41 @@ class AlphaMiner:
         else:
             self.record_module_stat(mod_used, False)
 
-        # Determine alpha status
+        # Only save alphas that meet submission criteria and pass all checks (no auto-submit)
+        checks = result.get("checks", [])
         if is_holy_grail:
-            logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f}")
-
-            # Check quota and try to submit
-            if self.quota.can_submit():
-                submit_result = self.submit_alpha(alpha_id)
-                if submit_result["success"]:
-                    self.stats["passed"] += 1
-                    self.quota.record_submission(alpha_id)
-                    logger.info(f"Submitted alpha {alpha_id}")
-                    alpha_status = "submitted"
-                else:
-                    # Log submission failure reason (e.g., autocorrelation)
-                    error_msg = submit_result.get("error", "Unknown")
-                    logger.warning(f"Alpha {alpha_id} submission failed: {error_msg}")
-                    logger.warning(f"  Expression: {expression[:80]}...")
-                    logger.warning(f"  S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f}")
-                    alpha_status = "submittable"
+            # Check if any checks failed
+            if self._has_failed_checks(checks):
+                failed_checks = [c["name"] for c in checks if c.get("result") == "FAIL"]
+                logger.warning(f"Alpha {alpha_id} failed checks: {failed_checks}")
+                logger.warning(f"  Expression: {expression[:80]}...")
+                logger.warning(f"  S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f}")
             else:
-                logger.info("Daily submission quota reached")
-                alpha_status = "submittable"
-        else:
-            alpha_status = "tested"
+                logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f} (unsubmitted)")
 
-        # Save ALL alphas to database with appropriate status
-        self.alpha_db.add_alpha(
-            expression=expression,
-            alpha_id=alpha_id,
-            sharpe=sharpe,
-            fitness=fitness,
-            turnover=turnover,
-            margin=margin,
-            returns=result.get("returns", 0),
-            long_count=result.get("long_count", 0),
-            short_count=result.get("short_count", 0),
-            drawdown=result.get("drawdown", 0),
-            grade=result.get("grade", ""),
-            checks=result.get("checks", []),
-            source="pipeline",
-            region=result.get("region", "USA"),
-            universe=result.get("universe", "TOP3000"),
-            delay=result.get("delay", 1),
-            decay=result.get("decay", 0),
-            neutralization=result.get("neutralization", "NONE"),
-            truncation=result.get("truncation", 0.08),
-            status=alpha_status,
-        )
+                # Save to database as unsubmitted
+                self.alpha_db.add_alpha(
+                    expression=expression,
+                    alpha_id=alpha_id,
+                    sharpe=sharpe,
+                    fitness=fitness,
+                    turnover=turnover,
+                    margin=margin,
+                    returns=result.get("returns", 0),
+                    long_count=result.get("long_count", 0),
+                    short_count=result.get("short_count", 0),
+                    drawdown=result.get("drawdown", 0),
+                    grade=result.get("grade", ""),
+                    checks=checks,
+                    source="pipeline",
+                    region=result.get("region", "USA"),
+                    universe=result.get("universe", "TOP3000"),
+                    delay=result.get("delay", 1),
+                    decay=result.get("decay", 0),
+                    neutralization=result.get("neutralization", "NONE"),
+                    truncation=result.get("truncation", 0.08),
+                    status="unsubmitted",
+                )
 
         # Reverse factor detection (Sharpe < -0.8)
         elif sharpe < -0.8:
