@@ -13,6 +13,7 @@ import glob
 import queue
 import random
 import threading
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional
 
@@ -39,7 +40,17 @@ RESCUE_THRESHOLD = 1.7
 # Data directories
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 FIELDS_DIR = os.path.join(DATA_DIR, "fields")
+OPERATORS_DIR = os.path.join(DATA_DIR, "operators")
 SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
+
+# Target field files to load (matching IQC approach)
+TARGET_FIELD_FILES = [
+    "price&volume.csv",
+    "fundamental.csv",
+    "analyst.csv",
+    "sentiment.csv",
+    "options.csv"
+]
 
 
 class AlphaMiner:
@@ -78,10 +89,40 @@ class AlphaMiner:
             "OPTIONS": {"tried": 0, "success": 0}
         }
 
+        # Operator knowledge base
+        self.operator_arity = self._load_operator_knowledge()
+
         # Create directories
         os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(FIELDS_DIR, exist_ok=True)
         os.makedirs(SHARED_POOL_DIR, exist_ok=True)
+
+    def _load_operator_knowledge(self) -> Dict[str, int]:
+        """Load operator arity from operators.csv."""
+        import pandas as pd
+        operators_file = os.path.join(OPERATORS_DIR, "operators.csv")
+
+        if not os.path.exists(operators_file):
+            logger.warning(f"Operators file not found: {operators_file}")
+            return {}
+
+        try:
+            df = pd.read_csv(operators_file, encoding='utf-8-sig')
+            # Extract arity from Definition column (count parameters)
+            arity_dict = {}
+            for _, row in df.iterrows():
+                name = str(row.get('Name', '')).strip()
+                definition = str(row.get('Definition', ''))
+                # Count parameters: look for pattern like func(x, y, z)
+                if '(' in definition:
+                    params = definition.split('(')[1].split(')')[0]
+                    arity = len([p.strip() for p in params.split(',') if p.strip()])
+                    arity_dict[name] = arity
+            logger.info(f"Loaded {len(arity_dict)} operators")
+            return arity_dict
+        except Exception as e:
+            logger.warning(f"Failed to load operators: {e}")
+            return {}
 
     def authenticate(self) -> bool:
         """Authenticate with WorldQuant Brain API."""
@@ -120,7 +161,7 @@ class AlphaMiner:
     # ==========================================
 
     def load_fields_from_csvs(self) -> Dict[str, List[Dict]]:
-        """Load field data from CSV files in the fields directory."""
+        """Load field data from specified CSV files (matching IQC approach)."""
         import pandas as pd
 
         selected_fields = {}
@@ -129,12 +170,13 @@ class AlphaMiner:
             logger.info("Fields directory not found, using default fields")
             return self._get_default_fields()
 
-        # Dynamically load all CSV files in the directory
-        for file in os.listdir(FIELDS_DIR):
-            if not file.endswith(".csv"):
+        # Only load target files (matching IQC approach)
+        for file in TARGET_FIELD_FILES:
+            filepath = os.path.join(FIELDS_DIR, file)
+            if not os.path.exists(filepath):
+                logger.warning(f"Target file not found: {file}")
                 continue
 
-            filepath = os.path.join(FIELDS_DIR, file)
             try:
                 df = pd.read_csv(filepath)
                 # Get top 10 fields with Field and Description columns
@@ -148,7 +190,7 @@ class AlphaMiner:
 
         # If no CSV files found, use defaults
         if not selected_fields:
-            logger.info("No CSV files found, using default fields")
+            logger.info("No target CSV files found, using default fields")
             selected_fields = self._get_default_fields()
 
         return selected_fields
@@ -645,7 +687,7 @@ class AlphaMiner:
         )
         producer.start()
 
-        # Main consumer loop
+        # Main consumer loop (event-driven, matching IQC approach)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             running_tasks = {}
 
@@ -670,17 +712,21 @@ class AlphaMiner:
                         time.sleep(1)
                         continue
 
-                    # Wait for tasks to complete
-                    for future in list(running_tasks.keys()):
-                        if future.done():
-                            factor = running_tasks.pop(future)
-                            try:
-                                result = future.result()
-                                if not self.process_result(factor, result):
-                                    return  # Fatal error
-                            except Exception as e:
-                                logger.error(f"Task exception: {e}")
-                                self.stats["failed"] += 1
+                    # Wait for any task to complete (event-driven, CPU efficient)
+                    done, _ = concurrent.futures.wait(
+                        running_tasks.keys(),
+                        return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+
+                    for future in done:
+                        factor = running_tasks.pop(future)
+                        try:
+                            result = future.result()
+                            if not self.process_result(factor, result):
+                                return  # Fatal error
+                        except Exception as e:
+                            logger.error(f"Task exception: {e}")
+                            self.stats["failed"] += 1
 
                     # Print stats periodically
                     if self.stats["tested"] % 15 == 0 and self.stats["tested"] > 0:
