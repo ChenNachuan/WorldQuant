@@ -49,7 +49,8 @@ TARGET_FIELD_FILES = [
     "price&volume.csv",
     "fundamental.csv",
     "analyst.csv",
-    "sentiment.csv"
+    "sentiment.csv",
+    "model.csv"
 ]
 
 
@@ -86,7 +87,8 @@ class AlphaMiner:
             "PRICE&VOLUME": {"tried": 0, "success": 0},
             "FUNDAMENTAL": {"tried": 0, "success": 0},
             "ANALYST": {"tried": 0, "success": 0},
-            "SENTIMENT": {"tried": 0, "success": 0}
+            "SENTIMENT": {"tried": 0, "success": 0},
+            "MODEL": {"tried": 0, "success": 0}
         }
 
         # Operator knowledge base
