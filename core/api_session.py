@@ -1,21 +1,13 @@
 """
-Unified API Session Manager for WorldQuant Brain.
+Simple API Session Manager for WorldQuant Brain.
 
-Centralises authentication, proxy configuration, rate limiting,
-and global 429 cooldown across all modules.  Every module that
-talks to the WorldQuant Brain API should obtain its session
-through get_session_manager() instead of constructing
-requests.Session() directly.
-
-Thread-safe — uses locks for login mutual-exclusion and global
-rate-limit cooldown so that concurrent threads don't stampede.
+Simplified version matching the IQC approach - direct requests.Session
+with basic authentication and retry logic.
 """
 
-import logging
 import os
-import threading
+import logging
 import time
-from datetime import datetime
 from typing import Optional
 
 import requests
@@ -23,254 +15,186 @@ from requests.auth import HTTPBasicAuth
 
 logger = logging.getLogger(__name__)
 
-# ── Global singleton (per process) ────────────────────────────────────
-_session_manager: Optional["SessionManager"] = None
-_manager_lock = threading.Lock()
+# Constants
+BASE_URL = "https://api.worldquantbrain.com"
 
 
-class SessionManager:
-    """Unified API session with centralised auth, proxy, rate-limiting."""
+class WorldQuantSession:
+    """Simple WorldQuant Brain API session."""
 
-    def __init__(
-        self,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        *,
-        auth_ttl_seconds: int = 1500,
-        max_retries: int = 7,
-        backoff_factor: float = 2.0,
-        pool_connections: int = 20,
-        pool_maxsize: int = 20,
-    ):
-        self._auth_ttl = auth_ttl_seconds
-        self._last_auth_time: float = 0.0
-        self._login_lock = threading.Lock()
-        self._global_cooldown_lock = threading.Lock()
-        self._global_cooldown_until: float = 0.0
-
+    def __init__(self, username: str = None, password: str = None):
+        """Initialize session with credentials from .env if not provided."""
         if username is None or password is None:
             from .config import load_credentials
-
             username, password = load_credentials()
-        self._username = username
-        self._password = password
 
-        self.session = requests.Session()
-        self.session.timeout = (30, 300)
-        self._apply_proxy()
-        self._apply_retry_adapter(
-            max_retries, backoff_factor, pool_connections, pool_maxsize
-        )
+        self.username = username
+        self.password = password
+        self.session = None
         self._authenticate()
 
-    # ── Public API ────────────────────────────────────────────────────
+    def _authenticate(self):
+        """Create authenticated session."""
+        logger.info("Authenticating with WorldQuant Brain...")
+
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        })
+        self.session.auth = HTTPBasicAuth(self.username, self.password)
+
+        try:
+            resp = self.session.post(
+                f"{BASE_URL}/authentication",
+                verify=False,
+                timeout=15
+            )
+            if resp.status_code == 201:
+                logger.info("Authentication successful")
+                return True
+            else:
+                raise Exception(f"Authentication failed: {resp.text}")
+        except Exception as e:
+            logger.error(f"Authentication error: {e}")
+            raise
 
     def ensure_authenticated(self):
-        """Re-auth if token may have expired (called before API calls)."""
-        if time.time() - self._last_auth_time > self._auth_ttl:
+        """Re-authenticate if session may have expired."""
+        # Simple check - if session exists, assume it's valid
+        # The caller should handle 401/403 responses and re-auth if needed
+        if self.session is None:
             self._authenticate()
 
-    def wait_if_rate_limited(self):
-        """Block if the session is in a global 429 cooldown window."""
-        with self._global_cooldown_lock:
-            remaining = self._global_cooldown_until - time.time()
-        if remaining > 0:
-            logger.info(
-                "Global rate-limit cooldown active, sleeping %.1fs", remaining
-            )
-            time.sleep(remaining)
+    def request(self, method: str, url: str, **kwargs):
+        """Make an API request with automatic retry on auth failure."""
+        # Ensure URL is absolute
+        if not url.startswith("http"):
+            url = f"{BASE_URL}{url}"
 
-    def report_rate_limit(self, retry_after: float = 30.0):
-        """Call when any thread receives a 429; sets global cooldown."""
-        with self._global_cooldown_lock:
-            self._global_cooldown_until = max(
-                self._global_cooldown_until,
-                time.time() + retry_after,
-            )
-            logger.info(
-                "Rate limit reported, cooldown until %s",
-                datetime.fromtimestamp(self._global_cooldown_until).strftime(
-                    "%H:%M:%S"
-                ),
-            )
+        # Set defaults
+        kwargs.setdefault("verify", False)
+        kwargs.setdefault("timeout", 30)
 
-    def request_with_retry(
-        self, method: str, url: str, max_attempts: int = 3, **kwargs
-    ):
-        """Make an API request with auth-aware retry.
+        try:
+            resp = self.session.request(method, url, **kwargs)
 
-        Handles 401/403 (re-auth), 429 (global cooldown), and
-        transient network errors with exponential backoff.
-        """
-        for attempt in range(max_attempts):
-            self.wait_if_rate_limited()
-            self.ensure_authenticated()
-
-            try:
+            # Handle auth failures
+            if resp.status_code in [401, 403]:
+                logger.warning("Auth expired, re-authenticating...")
+                self._authenticate()
                 resp = self.session.request(method, url, **kwargs)
 
-                if resp.status_code == 429:
-                    retry_after = float(
-                        resp.headers.get("Retry-After", 30)
-                    )
-                    self.report_rate_limit(retry_after)
-                    if attempt < max_attempts - 1:
-                        time.sleep(retry_after)
-                    continue
+            return resp
 
-                if resp.status_code in (401, 403):
-                    logger.warning(
-                        "Auth expired (HTTP %d), re-authenticating…",
-                        resp.status_code,
-                    )
-                    self._authenticate()
-                    if attempt < max_attempts - 1:
-                        continue
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error: {e}")
+            raise
 
-                # Also detect auth failures in 400 bodies
-                if (
-                    resp.status_code == 400
-                    and "authentication credentials"
-                    in resp.text.lower()
-                ):
-                    logger.warning(
-                        "Auth credentials rejected, re-authenticating…"
-                    )
-                    self._authenticate()
-                    if attempt < max_attempts - 1:
-                        continue
+    def get(self, url: str, **kwargs):
+        """Make a GET request."""
+        return self.request("GET", url, **kwargs)
 
-                return resp
+    def post(self, url: str, **kwargs):
+        """Make a POST request."""
+        return self.request("POST", url, **kwargs)
 
-            except (
-                requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError,
-            ) as e:
-                if attempt < max_attempts - 1:
-                    logger.warning(
-                        "Connection error attempt %d/%d: %s",
-                        attempt + 1,
-                        max_attempts,
-                        str(e)[:100],
-                    )
-                    self._apply_proxy()
-                    time.sleep(5)
-                else:
-                    raise
+    def submit_simulation(self, expression: str, settings: dict = None) -> dict:
+        """Submit a factor for backtesting."""
+        default_settings = {
+            "instrumentType": "EQUITY",
+            "region": "USA",
+            "universe": "TOP3000",
+            "delay": 1,
+            "decay": 0,
+            "neutralization": "NONE",
+            "truncation": 0.08,
+            "pasteurization": "ON",
+            "unitHandling": "VERIFY",
+            "nanHandling": "OFF",
+            "language": "FASTEXPR",
+            "visualization": False
+        }
 
-            except requests.exceptions.Timeout as e:
-                if attempt < max_attempts - 1:
-                    logger.warning(
-                        "Timeout attempt %d/%d: %s",
-                        attempt + 1,
-                        max_attempts,
-                        str(e)[:100],
-                    )
-                    time.sleep(5 * (2**attempt))
-                else:
-                    raise
+        if settings:
+            default_settings.update(settings)
 
-        # Should not reach here, but return last response if we do
-        return resp  # type: ignore[possibly-undefined]
+        payload = {
+            "type": "REGULAR",
+            "settings": default_settings,
+            "regular": expression
+        }
 
-    # ── Internal ──────────────────────────────────────────────────────
+        resp = self.post(f"{BASE_URL}/simulations", json=payload)
 
-    def _apply_proxy(self):
-        from .config import fix_session_proxy
+        if resp.status_code == 201:
+            sim_id = resp.headers.get("Location", "").split("/")[-1]
+            return {"success": True, "sim_id": sim_id}
+        else:
+            return {"success": False, "error": resp.text[:200]}
 
-        fix_session_proxy(self.session)
+    def poll_simulation(self, sim_id: str, timeout: int = 600) -> dict:
+        """Poll simulation until complete."""
+        start_time = time.time()
 
-    def _apply_retry_adapter(
-        self,
-        max_retries: int,
-        backoff_factor: float,
-        pool_connections: int,
-        pool_maxsize: int,
-    ):
-        retry_strategy = requests.adapters.Retry(
-            total=max_retries,
-            backoff_factor=backoff_factor,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PATCH"],
+        while time.time() - start_time < timeout:
+            resp = self.get(f"{BASE_URL}/simulations/{sim_id}")
+
+            if resp.status_code != 200:
+                time.sleep(3)
+                continue
+
+            data = resp.json()
+            status = data.get("status")
+
+            if status in ["FINISHED", "WARNING", "COMPLETE", "COMPLETED"]:
+                alpha_id = data.get("alpha")
+                if alpha_id:
+                    # Get alpha performance
+                    alpha_resp = self.get(f"{BASE_URL}/alphas/{alpha_id}")
+                    if alpha_resp.status_code == 200:
+                        perf = alpha_resp.json().get("is", {})
+                        return {
+                            "success": True,
+                            "alpha_id": alpha_id,
+                            "sharpe": perf.get("sharpe", 0),
+                            "fitness": perf.get("fitness", 0),
+                            "turnover": perf.get("turnover", 0),
+                            "margin": perf.get("margin", 0),
+                            "message": data.get("message", "Success")
+                        }
+                return {"success": True, "alpha_id": alpha_id}
+
+            elif status in ["ERROR", "FAILED"]:
+                return {"success": False, "error": data.get("message", "Unknown error")}
+
+            time.sleep(3)
+
+        return {"success": False, "error": "Simulation timeout"}
+
+    def submit_alpha(self, alpha_id: str) -> bool:
+        """Submit an alpha to WorldQuant Brain."""
+        resp = self.post(
+            f"{BASE_URL}/alphas/{alpha_id}/submit",
+            json={"type": "REGULAR"}
         )
-        adapter = requests.adapters.HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=pool_connections,
-            pool_maxsize=pool_maxsize,
-        )
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
-
-    def _authenticate(self):
-        with self._login_lock:
-            # Double-check inside lock — another thread may have refreshed
-            if time.time() - self._last_auth_time < self._auth_ttl:
-                return
-
-            self.session.auth = HTTPBasicAuth(
-                self._username, self._password
-            )
-
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    resp = self.session.post(
-                        "https://api.worldquantbrain.com/authentication",
-                        timeout=(15, 30),
-                    )
-                    if resp.status_code == 201:
-                        self._last_auth_time = time.time()
-                        logger.info(
-                            "Authenticated with WorldQuant Brain"
-                        )
-                        return
-                    raise RuntimeError(
-                        f"Auth failed: {resp.status_code} {resp.text[:200]}"
-                    )
-                except (
-                    requests.exceptions.SSLError,
-                    requests.exceptions.ConnectionError,
-                ) as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(
-                            "Auth attempt %d/%d: %s",
-                            attempt + 1,
-                            max_retries,
-                            str(e)[:100],
-                        )
-                        self._apply_proxy()
-                        time.sleep(5)
-                    else:
-                        raise
+        return resp.status_code == 201
 
 
-# ── Factory / singleton ──────────────────────────────────────────────
+# Global session instance
+_session: Optional[WorldQuantSession] = None
 
 
-def get_session_manager(
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-) -> SessionManager:
-    """Return the process-wide singleton SessionManager.
-
-    On first call, creates the singleton from .env credentials.
-    Subsequent calls return the same instance regardless of arguments.
-    """
-    global _session_manager
-    with _manager_lock:
-        if _session_manager is None:
-            _session_manager = SessionManager(
-                username=username, password=password
-            )
-        return _session_manager
+def get_session(username: str = None, password: str = None) -> WorldQuantSession:
+    """Get or create the global session instance."""
+    global _session
+    if _session is None:
+        _session = WorldQuantSession(username, password)
+    return _session
 
 
-def create_session(
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-) -> SessionManager:
-    """Create a *new* SessionManager (not the singleton).
-
-    Use when callers genuinely need independent sessions (rare).
-    """
-    return SessionManager(username=username, password=password)
+def reset_session():
+    """Reset the global session (for testing or re-authentication)."""
+    global _session
+    _session = None

@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="a84aa88c-1db2-4def-82d7-a764b873a2c9" name="更改" comment="feat: enhance README with new features and usage instructions; add submission quota and async polling modules">
+      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/.gitignore" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/WorldQuant.iml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/dataSources.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/101 Formulaic Alphas.pdf" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/alpha50.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/alpha_generator_ollama.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/alpha_lifecycle.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/alpha_orchestrator.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/api_session.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/api_session.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/ast_validator.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/async_poller.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/data_fetcher/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/data_fetcher/data_field_fetcher.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/data_fetcher/operator_fetcher.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/data_fetcher/smart_search.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/expression_compiler.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/hypothesis_manager.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/improved_alpha_submitter.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/machine_lib.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/quality_monitor.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/region_config.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/self_optimizer.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/simulation_slot_manager.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docker-compose.yml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/evolution/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/evolution/bandits.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/evolution/genetic_engine.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/evolution/similarity.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/README.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/audit_cloud.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/check_field_bug.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/check_heavy_ollama.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/check_ollama_custom.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/manual_breakthrough.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/mutate_alphas.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/pipeline.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/experiments/polish_alphas.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/infrastructure/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/infrastructure/health_check.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/infrastructure/model_fleet_manager.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/infrastructure/vram_monitor.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/insights/sample_insight_1.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/insights/theses_cache.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/legacy/README.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/legacy/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/legacy/alpha101_miner.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/legacy/alpha50_miner.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/miners/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/miners/alpha_expression_miner.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/miners/alpha_expression_miner_continuous.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/miners/machine_miner.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/miners/template_grid_miner.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_alpha_removal.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_orchestrator.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/dashboard.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/templates/dashboard.html" beforeDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="CopilotChats">
+    <option name="panelChat">
+      <chat>
+        <option name="activeSessionId" value="dbabe408-3c9d-4a3f-ad4b-e6ea86a76116" />
+        <option name="sessions">
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="dbabe408-3c9d-4a3f-ad4b-e6ea86a76116" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+        </option>
+        <option name="type" value="PANEL" />
+      </chat>
+    </option>
+  </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_/Users/nachuan/Documents/Code/WorldQuant" value="3Cy6pyTHHvQjzOacIjDpJoGgZ72" />
+    </persistenceIdMap>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;ChenNachuan&quot;
+  }
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/ChenNachuan/WorldQuant.git&quot;,
+    &quot;accountId&quot;: &quot;327b46e4-dc7e-46b4-bddb-3680212819bb&quot;
+  }
+}</component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 1,
+  &quot;fromUser&quot;: false
+}</component>
+  <component name="ProjectId" id="3Cy6pyTHHvQjzOacIjDpJoGgZ72" />
+  <component name="ProjectLevelVcsManager">
+    <ConfirmationsSetting value="1" id="Add" />
+  </component>
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;SHELLCHECK.PATH&quot;: &quot;/Users/nachuan/Library/Application Support/JetBrains/PyCharm2026.1/plugins/Shell Script/shellcheck&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/nachuan/Documents/Code/WorldQuant&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  },
+  &quot;keyToStringList&quot;: {
+    &quot;DatabaseDriversLRU&quot;: [
+      &quot;sqlite&quot;
+    ]
+  }
+}</component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$" />
+    </key>
+  </component>
+  <component name="RunManager">
+    <configuration name="WorldQuant" type="PythonConfigurationType" factoryName="Python">
+      <module name="WorldQuant" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="" />
+      <option name="IS_MODULE_SDK" value="false" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="false" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="RUN_TOOL" value="" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/web/dashboard.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-js-predefined-d6986cc7102b-3bd3a6803838-JavaScript-PY-261.22158.340" />
+        <option value="bundled-python-sdk-b63d5a1f7c97-b61e75351b1f-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.22158.340" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="默认任务">
+      <changelist id="a84aa88c-1db2-4def-82d7-a764b873a2c9" name="更改" comment="" />
+      <created>1777345648541</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1777345648541</updated>
+      <workItem from="1777345649727" duration="27847000" />
+      <workItem from="1779260456073" duration="518000" />
+      <workItem from="1779260977573" duration="1260000" />
+    </task>
+    <task id="LOCAL-00001" summary="feat: initialize project structure with configuration files and alpha mining scripts">
+      <option name="closed" value="true" />
+      <created>1777347815679</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1777347815679</updated>
+    </task>
+    <task id="LOCAL-00002" summary="feat: refactor authentication and session management across modules">
+      <option name="closed" value="true" />
+      <created>1777358018065</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1777358018065</updated>
+    </task>
+    <task id="LOCAL-00003" summary="refactor: remove unused HTTPBasicAuth imports from multiple files">
+      <option name="closed" value="true" />
+      <created>1777358705984</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1777358705984</updated>
+    </task>
+    <task id="LOCAL-00004" summary="feat: enhance README with new features and usage instructions; add submission quota and async polling modules">
+      <option name="closed" value="true" />
+      <created>1777359285052</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1777359285052</updated>
+    </task>
+    <task id="LOCAL-00005" summary="feat: enhance README with new features and usage instructions; add submission quota and async polling modules">
+      <option name="closed" value="true" />
+      <created>1777359291203</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1777359291203</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="feat: initialize project structure with configuration files and alpha mining scripts" />
+    <MESSAGE value="feat: refactor authentication and session management across modules" />
+    <MESSAGE value="refactor: remove unused HTTPBasicAuth imports from multiple files" />
+    <MESSAGE value="feat: enhance README with new features and usage instructions; add submission quota and async polling modules" />
+    <option name="LAST_COMMIT_MESSAGE" value="feat: enhance README with new features and usage instructions; add submission quota and async polling modules" />
+  </component>
+  <component name="github-copilot-workspace">
+    <instructionFileLocations>
+      <option value=".github/instructions" />
+    </instructionFileLocations>
+    <promptFileLocations>
+      <option value=".github/prompts" />
+    </promptFileLocations>
+  </component>
+</project>

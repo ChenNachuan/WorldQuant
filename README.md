@@ -1,41 +1,29 @@
 # WorldQuant Alpha 因子生成系统
 
-基于本地 Ollama 大语言模型的智能 Alpha 因子生成系统，自动生成、测试并提交 Alpha 因子到 WorldQuant Brain 平台。
+基于 LLM 的智能 Alpha 因子生成系统，自动生成、测试并提交 Alpha 因子到 WorldQuant Brain 平台。
 
 ## 核心特性
 
-- **本地 LLM 集成** — 使用 Ollama 运行 qwen3.5、deepseek-coder 等模型，Mixture of Experts 多主题策略生成
-- **统一 API 会话层** — `SessionManager` 集中管理认证、代理、全局 429 冷却、指数退避重试
-- **Alpha 生命周期状态机** — generated → simulating → simulated → checked → submitted，带状态转换校验
-- **提交配额感知** — 每日提交计数，持久化追踪，避免超限
-- **异步并发轮询** — `AsyncSimulationPoller` 基于 asyncio 的模拟进度并发轮询
-- **全局槽位管理** — SQLite 实现跨进程并发数 + 每日上限控制
-- **智能模型舰队管理** — 自动 VRAM 监控和模型降级
-- **遗传进化引擎** — 表达式交叉、变异、锦标赛选择，多臂老虎机算子/字段探索
-- **Web 监控界面** — Flask 实时状态与手动控制
-- **自动化工作流** — 连续 Alpha 生成、挖掘和提交
+- **双 LLM 支持** — 同时支持 DeepSeek API 和本地 Ollama 模型
+- **简化 API 会话** — 直接 requests.Session，自动重试和重认证
+- **提交配额感知** — 每日提交计数，持久化追踪
+- **异步生产者-消费者** — LLM 生成 + 并发回测流水线
+- **智能挽救机制** — 边界因子自动变种优化
 
 ## 系统要求
 
 - Python ≥ 3.11
-- [uv](https://docs.astral.sh/uv/) 包管理器
-- Ollama 本地服务
 - WorldQuant Brain 账户
-- GPU（可选，NVIDIA 加速推理）
+- DeepSeek API Key（推荐）或本地 Ollama 服务
 
 ## 快速开始
 
 ### 1. 安装依赖
 
 ```bash
-# 安装 uv（如果还没有）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 同步项目依赖
+pip install -r requirements.txt
+# 或使用 uv
 uv sync
-
-# 如需 GPU 支持（PyTorch）
-uv sync --extra gpu
 ```
 
 ### 2. 配置环境变量
@@ -47,201 +35,83 @@ cp .env.example .env
 编辑 `.env`：
 
 ```env
-WQ_USERNAME=your.email@worldquant.com
+# WorldQuant Brain 凭据
+WQ_USERNAME=your_email@example.com
 WQ_PASSWORD=your_password
+
+# LLM 配置（二选一）
+# 选项 1: DeepSeek API（推荐）
+DEEPSEEK_API_KEY=your_deepseek_api_key
+
+# 选项 2: Ollama 本地模型
 OLLAMA_URL=http://localhost:11434
-# 可选：覆盖默认模型
-# WQ_DEFAULT_MODEL=qwen3.5:35b
+OLLAMA_MODEL=qwen3:8b
 ```
 
-### 3. 启动 Ollama 并拉取模型
+### 3. 启动系统
 
 ```bash
-ollama serve
-ollama pull qwen3.5:35b
-ollama pull qwen3-coder:latest
-ollama pull deepseek-coder-v2:16b
-```
+# 使用 DeepSeek API（默认）
+python run_alpha_miner.py
 
-### 4. 启动系统
+# 指定 LLM 提供商
+python run_alpha_miner.py --llm deepseek
+python run_alpha_miner.py --llm ollama
 
-```bash
-# 连续挖掘模式（推荐）— 同时运行生成器 + 挖掘器 + 提交器
-uv run alpha-orchestrator --mode continuous
-
-# 或者使用长格式
-uv run python -m core.alpha_orchestrator --mode continuous
+# 调整并发数
+python run_alpha_miner.py --workers 3
 ```
 
 ## 项目结构
 
 ```
 WorldQuant/
-├── core/                                    # 核心业务逻辑
-│   ├── config.py                            # 环境变量、凭据、模型配置
-│   ├── api_session.py                       # 统一 API 会话（认证/代理/限流/重试）
-│   ├── alpha_db.py                          # SQLite 数据库（WAL 模式，线程安全）
-│   ├── alpha_lifecycle.py                   # Alpha 生命周期状态机
-│   ├── submission_quota.py                  # 每日提交配额追踪
-│   ├── async_poller.py                      # asyncio 并发轮询器
-│   ├── simulation_slot_manager.py           # 全局模拟槽位管理
-│   ├── region_config.py                     # 区域/股票池配置
-│   ├── alpha_orchestrator.py                # 主编排器（调度、模型舰队管理）
-│   ├── alpha_generator_ollama.py            # Alpha 生成器（Ollama LLM）
-│   ├── improved_alpha_submitter.py          # Alpha 提交器
-│   ├── machine_lib.py                       # WorldQuant Brain API 封装
-│   ├── ast_validator.py                     # 表达式语法/语义校验
-│   ├── expression_compiler.py               # 模板表达式生成与变异
-│   ├── self_optimizer.py                    # 算子/窗口/分组成功率追踪
-│   ├── quality_monitor.py                   # 质量监控与退化检测
-│   ├── hypothesis_manager.py                # 假设提取与管理
-│   ├── log_manager.py                       # 日志（按模块、按日期分文件）
-│   ├── data_fetcher/                        # 数据获取子包
-│   │   ├── operator_fetcher.py              #   算子获取 + 磁盘缓存
-│   │   ├── data_field_fetcher.py            #   数据字段获取 + 磁盘缓存
-│   │   └── smart_search.py                  #   TF-IDF 智能字段搜索
-├── miners/                                  # 挖掘策略
-│   ├── alpha_expression_miner.py            # 表达式参数挖掘
-│   ├── alpha_expression_miner_continuous.py # 持续表达式挖掘
-│   ├── template_grid_miner.py               # 模板网格挖掘
-│   └── machine_miner.py                     # 暴力字段×算子组合挖掘
-├── evolution/                               # 遗传算法与优化
-│   ├── genetic_engine.py                    # 遗传引擎（交叉/变异/锦标赛选择）
-│   ├── bandits.py                           # 多臂老虎机（UCB1 算子/字段探索）
-│   └── similarity.py                        # 模板相似度去重
-├── infrastructure/                          # 基础设施与监控
-│   ├── model_fleet_manager.py               # Docker 模型舰队管理
-│   ├── vram_monitor.py                      # GPU 显存监控（nvidia-smi）
-│   └── health_check.py                      # 健康检查（Ollama / WQ / Web）
-├── web/                                     # Web 界面
-│   ├── dashboard.py                         # Flask 仪表盘
-│   └── templates/dashboard.html             # 仪表盘模板
-├── experiments/                             # 研究实验脚本
-│   ├── pipeline.py                          # 闭环管道（AI + 遗传进化 + 提交）
-│   ├── manual_breakthrough.py               # 手工突破尝试
-│   ├── mutate_alphas.py                     # LLM 驱动表达式变异
-│   ├── polish_alphas.py                     # 网格搜索参数优化
-│   └── audit_cloud.py                       # 云端 Alpha 审计
-├── legacy/                                  # 历史兼容
-│   ├── alpha50_miner.py                     # Alpha50 论文公式挖掘
-│   └── alpha101_miner.py                    # Alpha101 公式挖掘
-├── tests/                                   # 测试
-├── insights/                                # 假设/洞察文本文件
-├── data/                                    # 运行时数据（DB、状态文件）
-├── cache/                                   # API 响应缓存
-├── log/                                     # 日志输出
-├── .env.example
-├── pyproject.toml
-└── README.md
+├── core/                          # 核心业务逻辑
+│   ├── config.py                  # 环境变量和凭据加载
+│   ├── api_session.py             # 简化 API 会话管理
+│   ├── alpha_db.py                # SQLite Alpha 数据库
+│   ├── llm_client.py              # 统一 LLM 客户端（Ollama + DeepSeek）
+│   ├── submission_quota.py        # 每日提交配额追踪
+│   ├── log_manager.py             # 日志管理
+│   └── alpha_lifecycle.py         # Alpha 生命周期状态机
+├── run_alpha_miner.py             # 主程序入口
+├── IQC_final.ipynb                # 参考实现（Jupyter Notebook）
+├── .env.example                   # 环境变量示例
+├── pyproject.toml                 # 项目配置
+└── README.md                      # 本文件
 ```
-
-## 快捷命令
-
-`pyproject.toml` 注册了以下脚本，可直接用 `uv run <script>` 运行：
-
-| 命令 | 说明 |
-|------|------|
-| `uv run alpha-orchestrator` | 主编排器 |
-| `uv run alpha-generator` | Alpha 生成器 |
-| `uv run alpha-submitter` | Alpha 提交器 |
-| `uv run alpha-miner --expression "..."` | 表达式参数挖掘 |
-| `uv run alpha-miner-continuous` | 持续表达式挖掘 |
-| `uv run template-miner` | 模板网格挖掘 |
-| `uv run machine-miner` | 机器挖掘 |
-| `uv run fleet-manager --status` | 模型舰队管理 |
-| `uv run vram-monitor` | GPU 显存监控 |
-| `uv run health-check` | 健康检查 |
-| `uv run dashboard` | Web 仪表盘 (http://localhost:5000) |
-
-## 编排器运行模式
-
-| 模式 | 说明 |
-|------|------|
-| `--mode continuous` | 同时运行生成器和挖掘器（默认） |
-| `--mode daily` | 完整每日工作流（生成 → 挖掘 → 提交） |
-| `--mode generator` | 仅运行 Alpha 生成器 |
-| `--mode miner` | 仅运行表达式挖掘器 |
-| `--mode submitter` | 仅运行 Alpha 提交器 |
-| `--mode fleet-status` | 查看模型舰队状态 |
-| `--mode fleet-reset` | 重置到最大模型 |
-| `--mode fleet-downgrade` | 强制降级到下一模型 |
 
 ## 命令行参数
 
-### 编排器 (`alpha-orchestrator`)
-
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--mode` | `continuous` | 运行模式 |
-| `--ollama-url` | `.env` 中的值 | Ollama API URL |
-| `--ollama-model` | `qwen3.5:35b` | 使用的 Ollama 模型 |
-| `--max-concurrent` | `3` | 最大并发模拟数 |
-| `--batch-size` | `3` | 操作批次大小 |
-| `--mining-interval` | `6` | 挖掘间隔（小时） |
-| `--restart-interval` | `30` | 进程重启间隔（分钟） |
+| `--llm` | `auto` | LLM 提供商：`auto`, `deepseek`, `ollama` |
+| `--workers` | `2` | 并发模拟 worker 数量 |
 
-### 生成器 (`alpha-generator`)
+## 核心流程
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--ollama-url` | `http://localhost:11434` | Ollama API URL |
-| `--ollama-model` | `qwen3.5:35b` | 使用的模型 |
-| `--batch-size` | `3` | 每批生成数量 |
-| `--sleep-time` | `10` | 批次间休眠（秒） |
-| `--max-concurrent` | `2` | 最大并发模拟数 |
-| `--sim-timeout` | `1800` | 单次模拟超时（秒） |
-| `--log-level` | `INFO` | 日志级别 |
+### Alpha 生成
 
-### 提交器 (`alpha-submitter`)
+1. LLM 根据提供的数据字段生成 Alpha 表达式
+2. 表达式格式：`ts_decay_linear(group_neutralize(zscore(...), subindustry), 5)`
+3. 每次生成 5 个候选因子
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--batch-size` | `3` | 批次大小 |
-| `--interval-hours` | `24` | 提交间隔（小时） |
-| `--auto-mode` | 否 | 单次运行（不循环） |
-| `--timeout-minutes` | `20` | 提交超时（分钟） |
-| `--min-hopeful-count` | `50` | 最小候选数 |
+### 回测与提交
 
-### 管道 (`experiments.pipeline`)
+1. 提交因子到 WorldQuant Brain 进行回测
+2. 轮询等待回测结果（最长 10 分钟）
+3. 根据结果决定下一步：
+   - **Sharpe ≥ 1.25 且 Fitness ≥ 1.0** → 自动提交
+   - **|Sharpe| + |Fitness| > 1.7** → 触发挽救机制，生成变种
+   - **Sharpe < -0.8** → 加负号重测（反向因子）
+   - 其他 → 记录失败，继续下一个
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--region` | `USA` | 区域 |
-| `--model` | `deepseek-coder-v2:16b` | 模型 |
-| `--target` | `2` | 目标 Alpha 数 |
-| `--max-batches` | `50` | 最大批次数 |
-| `--concurrent` | `2` | 并发数 |
-| `--mode` | `auto` | auto / grid |
+### 挽救机制
 
-## 架构说明
-
-### API 会话层 (`api_session.py`)
-
-所有模块通过 `get_session_manager()` 获取统一的会话单例，不再各自创建 `requests.Session`。`SessionManager` 提供：
-
-- **主动重认证** — 每 25 分钟自动刷新，`login_lock` 防止并发重复登录
-- **全局 429 冷却** — 任一线程收到限流后，所有线程统一等待
-- **`request_with_retry()`** — 自动处理 401/403 重认证、429 等待、SSL 重试、超时退避
-- **代理自适应** — 自动检测 HTTP/HTTPS/SOCKS 代理并配置
-
-### Alpha 生命周期
-
-```
-generated → simulating → simulated → checked → submitted
-                ↓            ↓           ↓
-              failed ←── retrying ←──────┘
-```
-
-每次状态转换都经过 `validate_transition()` 校验，非法转换抛出 `ValueError`。数据库 `alphas` 表的 `lifecycle_state` 列在 `ON CONFLICT` 更新时自动保留 `submitted`/`checked` 不被降级。
-
-### 提交配额
-
-`SubmissionQuota` 单例追踪每日提交数，数据持久化到 `data/submission_log.json`。`submit_hopeful_alphas` 和 `batch_submit` 在每次成功提交后检查配额，达到上限自动停止。
-
-### 日志系统
-
-`log_manager.setup_logger(__name__, "module_tag")` 按模块和日期输出日志文件：
-`log/{module}/{YYYY-MM-DD}.log`
+对于边界因子（表现一般但有潜力），系统会：
+1. 将因子信息发送给 LLM
+2. LLM 生成 3 个变种因子
+3. 变种因子进入回测队列
 
 ## 环境变量
 
@@ -249,49 +119,76 @@ generated → simulating → simulated → checked → submitted
 |------|------|------|
 | `WQ_USERNAME` | 是 | WorldQuant Brain 用户名 |
 | `WQ_PASSWORD` | 是 | WorldQuant Brain 密码 |
+| `DEEPSEEK_API_KEY` | 否* | DeepSeek API Key（使用 DeepSeek 时必需） |
 | `OLLAMA_URL` | 否 | Ollama API 地址（默认 `http://localhost:11434`） |
-| `WQ_DEFAULT_MODEL` | 否 | 覆盖默认模型（优先级高于 `data/model_config.json`） |
+| `OLLAMA_MODEL` | 否 | Ollama 模型名称（默认 `qwen3:8b`） |
 
-模型选择优先级：`WQ_DEFAULT_MODEL` 环境变量 → `data/model_config.json` → 回退 `qwen3.5:35b`。运行时可通过 `set_default_model()` 持久化到配置文件。
+## 使用 DeepSeek API
 
-## 模型舰队
+DeepSeek API 是推荐的选择，因为：
+- 无需本地 GPU
+- 响应速度快
+- 支持 DeepSeek Reasoner 模型
 
-系统维护从大到小的模型舰队，自动处理 VRAM 问题：
+获取 API Key：https://platform.deepseek.com/
 
-1. **qwen3.5:35b** (23.8 GB) — 首选默认模型
-2. **qwen3-coder:latest** (18.6 GB) — 代码能力备选
-3. **deepseek-coder-v2:16b** (8.9 GB) — 轻量级备选
+## 使用 Ollama 本地模型
 
-连续 3 次 VRAM 错误后自动降级。状态持久化到 `data/model_fleet_state.json`。
-
-## Docker 部署
+如果选择使用 Ollama：
 
 ```bash
-# 启动所有服务（Ollama + 挖掘器 + 仪表盘）
-docker-compose up -d
+# 安装 Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
 
-# 查看日志
-docker-compose logs -f alpha-miner
+# 拉取模型
+ollama pull qwen3:8b
+
+# 启动服务
+ollama serve
 ```
 
 ## 故障排除
 
 ### 认证失败
 - 确认 `.env` 文件存在且凭据正确
-- 系统会自动重试 3 次（指数退避），无需手动干预
+- 系统会自动重试，无需手动干预
+
+### DeepSeek API 错误
+- 检查 `DEEPSEEK_API_KEY` 是否正确
+- 确认 API 账户有足够额度
 
 ### Ollama 连接失败
 - 确认 Ollama 已启动：`ollama serve`
 - 确认模型已拉取：`ollama list`
 
-### API 速率限制 (429)
-- 全局冷却机制会自动等待 `Retry-After` 时间
-- 可减少 `--batch-size` 和 `--max-concurrent`
-
-### VRAM 不足
-- 减少 `--batch-size` 和 `--max-concurrent`
-- 系统会检测 VRAM 错误并自动降级模型
+### API 速率限制
+- 系统会自动处理 429 错误
+- 可减少 `--workers` 数量
 
 ### 模拟超时
-- 默认 30 分钟超时，可通过 `--sim-timeout` 调整
-- 超时后模拟标记为失败，表达式进入重试队列
+- 默认 10 分钟超时
+- 超时后模拟标记为失败，继续下一个
+
+## 开发说明
+
+### 添加新的 LLM 提供商
+
+编辑 `core/llm_client.py`，在 `LLMClient` 类中添加新方法：
+
+```python
+def _setup_new_provider(self):
+    # 初始化代码
+    pass
+
+def _generate_new_provider(self, system_prompt, user_prompt):
+    # 生成代码
+    pass
+```
+
+### 自定义 Alpha 生成策略
+
+编辑 `run_alpha_miner.py` 中的 `generate_alphas()` 方法，修改 prompt 或添加新的生成逻辑。
+
+## 许可证
+
+MIT License

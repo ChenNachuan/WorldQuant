@@ -1,5 +1,11 @@
 import os
 import logging
+
+# Clean SOCKS proxy BEFORE requests is imported — prevents urllib3/requests
+# from picking up all_proxy and failing SSL connections
+for _k in ('all_proxy', 'ALL_PROXY'):
+    os.environ.pop(_k, None)
+
 import requests
 from dotenv import load_dotenv
 
