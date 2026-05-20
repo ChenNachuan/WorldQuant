@@ -345,8 +345,7 @@ class AlphaMiner:
 
         logger.info("Generating crossover from elite parents...")
 
-        prompt = f"""请提取这两个精英因子的核心逻辑，创造 3 个逻辑杂交的新变种，
-必须保持 ts_decay_linear(group_neutralize(zscore(...))) 外壳不变。
+        prompt = f"""杂交以下两个因子，生成3个新变种，必须保持ts_decay_linear(group_neutralize(zscore(...)))外壳不变。
 
 父A: {parents[0]['expression']}
 父B: {parents[1]['expression']}"""
@@ -684,21 +683,12 @@ class AlphaMiner:
         sharpe = task.get("sharpe", 0)
         fitness = task.get("fitness", 0)
 
-        prompt = f"""这个因子阵亡了，请给出 3 种不同视角的抢救变种，
-必须保持 ts_decay_linear(group_neutralize(zscore(...))) 外壳不变。
+        turnover = task.get('turnover', 0)
+        prompt = f"""因子失败，生成3个变种，必须保持ts_decay_linear(group_neutralize(zscore(...)))外壳不变。
 
 原代码: {expression}
-【尸检报告】
-- Sharpe: {sharpe:.2f}
-- Fitness: {fitness:.2f}
-- Turnover(换手率): {task.get('turnover', 0):.2f}
-- Margin: {task.get('margin', 0):.2f}
-
-【挽救建议】
-- 如果 turnover 较高，必须增加时序窗口长度
-- 如果表现平庸，尝试颠倒逻辑或使用不同算子
-
-请生成 3 个变种因子。"""
+Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
+建议: turnover高则加大窗口，表现平庸则颠倒逻辑或换算子"""
 
         variants = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
 
