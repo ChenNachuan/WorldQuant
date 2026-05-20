@@ -44,12 +44,12 @@ OPERATORS_DIR = os.path.join(DATA_DIR, "operators")
 SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
 
 # Target field files to load (matching IQC approach)
+# Note: options.csv removed - contains invalid field names, options fields are in price&volume.csv
 TARGET_FIELD_FILES = [
     "price&volume.csv",
     "fundamental.csv",
     "analyst.csv",
-    "sentiment.csv",
-    "options.csv"
+    "sentiment.csv"
 ]
 
 
@@ -81,12 +81,12 @@ class AlphaMiner:
         }
 
         # Dynamic module weights (reinforcement learning style)
+        # Note: OPTIONS removed - fields are in price&volume.csv
         self.module_stats = {
             "PRICE&VOLUME": {"tried": 0, "success": 0},
             "FUNDAMENTAL": {"tried": 0, "success": 0},
             "ANALYST": {"tried": 0, "success": 0},
-            "SENTIMENT": {"tried": 0, "success": 0},
-            "OPTIONS": {"tried": 0, "success": 0}
+            "SENTIMENT": {"tried": 0, "success": 0}
         }
 
         # Operator knowledge base
@@ -476,8 +476,8 @@ class AlphaMiner:
 
         return {"error": "Simulation timeout"}
 
-    def submit_alpha(self, alpha_id: str) -> bool:
-        """Submit alpha to WorldQuant Brain."""
+    def submit_alpha(self, alpha_id: str) -> Dict:
+        """Submit alpha to WorldQuant Brain. Returns dict with success status and details."""
         try:
             resp = self.session.post(
                 f"{BASE_URL}/alphas/{alpha_id}/submit",
@@ -485,10 +485,16 @@ class AlphaMiner:
                 verify=False,
                 timeout=15
             )
-            return resp.status_code == 201
+
+            if resp.status_code == 201:
+                return {"success": True}
+            else:
+                # Capture error message from response
+                error_msg = resp.text[:200] if resp.text else "Unknown error"
+                return {"success": False, "error": error_msg}
         except Exception as e:
             logger.error(f"Submit error: {e}")
-            return False
+            return {"success": False, "error": str(e)}
 
     # ==========================================
     # Result Processing
@@ -548,7 +554,8 @@ class AlphaMiner:
 
             # Check quota
             if self.quota.can_submit():
-                if self.submit_alpha(alpha_id):
+                submit_result = self.submit_alpha(alpha_id)
+                if submit_result["success"]:
                     self.stats["passed"] += 1
                     self.quota.record_submission(alpha_id)
                     logger.info(f"Submitted alpha {alpha_id}")
@@ -560,6 +567,12 @@ class AlphaMiner:
                         fitness=fitness,
                         alpha_id=alpha_id
                     )
+                else:
+                    # Log submission failure reason (e.g., autocorrelation)
+                    error_msg = submit_result.get("error", "Unknown")
+                    logger.warning(f"Alpha {alpha_id} submission failed: {error_msg}")
+                    logger.warning(f"  Expression: {expression[:80]}...")
+                    logger.warning(f"  S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f}")
             else:
                 logger.info("Daily submission quota reached")
 
