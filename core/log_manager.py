@@ -27,7 +27,7 @@ def get_log_file(module: str) -> str:
     return os.path.join(module_dir, f"{date_str}.log")
 
 
-def setup_logger(name: str, module: str, level: int = logging.INFO) -> logging.Logger:
+def setup_logger(name: str, module: str, level: int = logging.WARNING) -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
