@@ -181,7 +181,13 @@ DEFAULT_SYSTEM_PROMPT = """你是一名 WorldQuant 顶级量化架构师。
    ts_decay_linear( zscore( 你的核心截面/时序逻辑 ), 5 )
 4. 不要在表达式中使用 group_neutralize，中性化由 settings 控制。
 5. JSON 结构必须为: [{"logic": "描述", "expression": "代码", "settings": {"delay":1, "neutralization":"INDUSTRY", "truncation":0.08, "pasteurization":"ON"}}]
-6. 事件字段（如 nws_*, snt_*, scl_*_buzz* 等）不能参与算术运算（+,-,*,/），只能用于条件判断（if-then）或 ts_count/ts_sum 等聚合函数。
+6. 事件字段（如 nws_*, snt_*, scl_*_buzz* 等）不能参与算术运算（+,-,*,/），只能用于 trade_when 或 if_else 条件判断。
+7. 运算符参数必须严格遵守：
+   - 单参数：rank(x), sign(x), abs(x), log(x), zscore(x), inverse(x), sqrt(x)
+   - 时序单参数+窗口：ts_rank(x,d), ts_zscore(x,d), ts_mean(x,d), ts_std_dev(x,d), ts_sum(x,d), ts_delta(x,d), ts_delay(x,d), ts_decay_linear(x,d)
+   - 时序双参数+窗口：ts_corr(x,y,d), ts_covariance(y,x,d)
+   - 逻辑：if_else(condition, true_val, false_val), trade_when(condition, x, y)
+   - 错误示例：rank(a,b) ❌ → 正确：rank(a/b) ✓
 """
 
 
