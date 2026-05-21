@@ -5,13 +5,17 @@ Fetches available data fields and operators from the WQ Brain API.
 Saves results to organized directories:
 - data/fields/{dataset}.csv — Data fields grouped by dataset
 - data/operators/operators.csv — All operators
+
+Fields are cached locally to avoid repeated API calls (429 rate limit).
+Re-run this script manually when you want to refresh the field list.
 """
 
 import os
+import re
 import json
 import logging
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 
 import pandas as pd
 
@@ -22,212 +26,257 @@ BASE_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 FIELDS_DIR = os.path.join(BASE_DATA_DIR, "fields")
 OPERATORS_DIR = os.path.join(BASE_DATA_DIR, "operators")
 
+# Region -> Universe mapping
+REGION_UNIVERSE_MAP: Dict[str, List[str]] = {
+    "USA": ["TOP3000", "TOP1000", "TOP500"],
+    "GLB": ["TOP3000"],
+    "EUR": ["TOP2500", "TOP1200"],
+    "ASI": ["MINVOL1M"],
+    "CHN": ["TOP2000U"],
+}
+
 
 class DataFetcher:
     """Fetches data fields and operators from WorldQuant Brain API."""
 
     def __init__(self, session=None):
-        """
-        Initialize with an authenticated session.
-
-        Args:
-            session: WorldQuantSession instance (optional, will create if not provided)
-        """
-        # Create directories
         os.makedirs(FIELDS_DIR, exist_ok=True)
         os.makedirs(OPERATORS_DIR, exist_ok=True)
 
-        # Use passed session or create a fresh one
         if session is not None:
-            # Use the session from WorldQuantSession
-            self._requests_session = session.session if hasattr(session, 'session') else session
+            self._session = session.session if hasattr(session, "session") else session
         else:
-            # Create fresh session
             import requests
             from requests.auth import HTTPBasicAuth
             from core.config import load_credentials
 
             username, password = load_credentials()
-            self._requests_session = requests.Session()
-            self._requests_session.auth = HTTPBasicAuth(username, password)
+            self._session = requests.Session()
+            self._session.auth = HTTPBasicAuth(username, password)
+            self._session.headers.update({
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+            })
 
-            # Authenticate
-            resp = self._requests_session.post(
-                'https://api.worldquantbrain.com/authentication',
+            resp = self._session.post(
+                "https://api.worldquantbrain.com/authentication",
                 verify=False,
-                timeout=15
+                timeout=15,
             )
             if resp.status_code != 201:
                 raise Exception(f"Authentication failed: {resp.text}")
+
+    # ── Dataset discovery ────────────────────────────────────────────
+
+    def fetch_datasets(
+        self,
+        region: str = "USA",
+        universe: str = "TOP3000",
+        delay: int = 1,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """Fetch all dataset IDs for a given region/universe/delay."""
+        url = "https://api.worldquantbrain.com/data-sets"
+        all_datasets = []
+        offset = 0
+
+        while True:
+            params = {
+                "delay": delay,
+                "instrumentType": "EQUITY",
+                "limit": limit,
+                "offset": offset,
+                "region": region,
+                "universe": universe,
+            }
+
+            try:
+                resp = self._session.get(url, params=params, verify=False, timeout=30)
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 30))
+                    logger.warning(f"Rate limited, waiting {retry_after}s...")
+                    time.sleep(retry_after)
+                    continue
+
+                if resp.status_code != 200:
+                    logger.warning(f"Failed to fetch datasets: {resp.status_code}")
+                    break
+
+                data = resp.json()
+                results = data.get("results", [])
+                total = data.get("count", 0)
+
+                if not results:
+                    break
+
+                for item in results:
+                    ds_id = item.get("id") or item.get("dataset_id")
+                    if ds_id:
+                        all_datasets.append({
+                            "id": ds_id,
+                            "name": item.get("name", ds_id),
+                            "fields": item.get("fieldCount", 0),
+                        })
+
+                logger.info(f"  Fetched {len(all_datasets)}/{total} datasets...")
+                if len(all_datasets) >= total:
+                    break
+
+                offset += limit
+                time.sleep(2)
+
+            except Exception as e:
+                logger.warning(f"Error fetching datasets: {e}")
+                break
+
+        logger.info(f"Found {len(all_datasets)} datasets for {region}/{universe}")
+        return all_datasets
+
+    # ── Field fetching (per dataset) ─────────────────────────────────
+
+    def fetch_fields_for_dataset(
+        self,
+        dataset_id: str,
+        region: str = "USA",
+        universe: str = "TOP3000",
+        delay: int = 1,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """Fetch all fields for a specific dataset."""
+        url = "https://api.worldquantbrain.com/data-fields"
+        all_fields = []
+        offset = 0
+
+        while True:
+            params = {
+                "instrumentType": "EQUITY",
+                "region": region,
+                "delay": delay,
+                "universe": universe,
+                "dataset.id": dataset_id,
+                "limit": limit,
+                "offset": offset,
+            }
+
+            try:
+                resp = self._session.get(url, params=params, verify=False, timeout=30)
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 10))
+                    logger.warning(f"Rate limited, waiting {retry_after}s...")
+                    time.sleep(retry_after)
+                    continue
+
+                if resp.status_code != 200:
+                    logger.warning(f"Failed to fetch fields for {dataset_id}: {resp.status_code}")
+                    break
+
+                data = resp.json()
+                results = data.get("results", [])
+                total = data.get("count", 0)
+
+                if not results:
+                    break
+
+                all_fields.extend(results)
+                if len(all_fields) >= total:
+                    break
+
+                offset += limit
+                time.sleep(2)
+
+            except Exception as e:
+                logger.warning(f"Error fetching fields for {dataset_id}: {e}")
+                break
+
+        return all_fields
+
+    # ── Full field fetch (all datasets) ──────────────────────────────
 
     def fetch_all_fields(
         self,
         region: str = "USA",
         universe: str = "TOP3000",
-        instrument_type: str = "EQUITY",
         delay: int = 1,
-        limit: int = 100,
-        timeout: int = 60
     ) -> List[Dict]:
-        """
-        Fetch all available data fields with pagination.
+        """Fetch all fields by iterating through datasets."""
+        logger.info(f"Fetching all fields for {region}/{universe}...")
 
-        Args:
-            region: Region code (USA, CHN, EUR, ASI, etc.)
-            universe: Universe (TOP3000, TOP1000, TOP500, etc.)
-            instrument_type: Asset type (EQUITY, etc.)
-            delay: Delay in days (1 = point-in-time)
-            limit: Max fields to fetch per request
-            timeout: Request timeout in seconds
-
-        Returns:
-            List of all field dicts
-        """
-        logger.info(f"Fetching data fields for {region}/{universe}...")
-
-        base_url = "https://api.worldquantbrain.com/data-fields"
+        datasets = self.fetch_datasets(region=region, universe=universe, delay=delay)
         all_fields = []
-        offset = 0
-        max_retries = 3
 
-        while True:
-            # Build params dict for clean URL construction
-            params = {
-                "instrumentType": instrument_type,
-                "region": region,
-                "universe": universe,
-                "delay": delay,
-                "limit": limit,
-                "offset": offset
-            }
+        for i, ds in enumerate(datasets):
+            ds_id = ds["id"]
+            logger.info(f"  [{i+1}/{len(datasets)}] Fetching fields for dataset: {ds_id}")
+            fields = self.fetch_fields_for_dataset(
+                dataset_id=ds_id,
+                region=region,
+                universe=universe,
+                delay=delay,
+            )
 
-            for attempt in range(max_retries):
-                try:
-                    logger.debug(f"Fetching offset={offset}...")
-                    resp = self._requests_session.get(
-                        base_url,
-                        params=params,
-                        verify=False,
-                        timeout=timeout
-                    )
-                    logger.debug(f"Status: {resp.status_code}")
+            # Tag each field with dataset info
+            for f in fields:
+                f["_dataset_id"] = ds_id
+                f["_dataset_name"] = ds.get("name", ds_id)
 
-                    # Handle rate limiting
-                    if resp.status_code == 429:
-                        retry_after = int(resp.headers.get("Retry-After", 30))
-                        logger.warning(f"Rate limited, waiting {retry_after}s...")
-                        time.sleep(retry_after)
-                        continue
+            all_fields.extend(fields)
+            logger.info(f"    Got {len(fields)} fields (total: {len(all_fields)})")
+            time.sleep(3)
 
-                    if resp.status_code != 200:
-                        logger.warning(f"Failed to fetch fields (status {resp.status_code}), retrying...")
-                        time.sleep(5)
-                        continue
-
-                    data = resp.json()
-                    results = data.get("results", [])
-                    total_count = data.get("count", 0)
-
-                    if not results:
-                        logger.info(f"Finished fetching. Total: {len(all_fields)} fields")
-                        return all_fields
-
-                    all_fields.extend(results)
-                    logger.info(f"  Fetched {len(all_fields)}/{total_count} fields...")
-
-                    # Check if we've fetched all
-                    if len(all_fields) >= total_count:
-                        logger.info(f"Finished fetching. Total: {len(all_fields)} fields")
-                        return all_fields
-
-                    # Move to next page
-                    offset += limit
-
-                    # Polite delay to avoid rate limiting
-                    time.sleep(2)
-                    break  # Success, exit retry loop
-
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(5)
-                    else:
-                        logger.error(f"Failed to fetch fields after {max_retries} attempts")
-                        return all_fields
-
+        logger.info(f"Finished fetching. Total: {len(all_fields)} fields from {len(datasets)} datasets")
         return all_fields
 
+    # ── Save fields to CSV ───────────────────────────────────────────
+
     def save_fields_to_csv(self, fields: List[Dict]) -> List[str]:
-        """
-        Save fields to CSV files grouped by dataset.
+        """Save fields to CSV files grouped by dataset."""
+        datasets: Dict[str, List[Dict]] = {}
 
-        Returns:
-            List of saved file paths
-        """
-        # Group by dataset
-        datasets = {}
         for field in fields:
-            dataset_info = field.get("dataset", {})
-            dataset_id = dataset_info.get("id", "unknown")
-            dataset_name = dataset_info.get("name", dataset_id)
+            ds_id = field.get("_dataset_id", "unknown")
+            ds_name = field.get("_dataset_name", ds_id)
 
-            if dataset_id not in datasets:
-                datasets[dataset_id] = {
-                    "name": dataset_name,
-                    "fields": []
-                }
+            if ds_id not in datasets:
+                datasets[ds_id] = {"name": ds_name, "fields": []}
 
-            datasets[dataset_id]["fields"].append({
+            datasets[ds_id]["fields"].append({
                 "Field": field.get("id", ""),
                 "Description": field.get("description", ""),
                 "Type": field.get("type", ""),
-                "Dataset": dataset_name,
-                "Category": field.get("category", {}).get("name", "")
+                "Dataset": ds_name,
             })
 
-        # Save each dataset to a separate CSV
         saved_files = []
-        for dataset_id, dataset_info in datasets.items():
-            dataset_fields = dataset_info.get("fields", [])
-            dataset_name = dataset_info.get("name", dataset_id)
-
-            if not dataset_fields:
+        for ds_id, ds_info in datasets.items():
+            ds_fields = ds_info["fields"]
+            if not ds_fields:
                 continue
 
-            # Clean filename
-            safe_name = dataset_id.replace("/", "_").replace(" ", "_").lower()
+            safe_name = re.sub(r"[^a-z0-9_]+", "_", ds_id.lower()).strip("_")
             csv_path = os.path.join(FIELDS_DIR, f"{safe_name}.csv")
 
-            df = pd.DataFrame(dataset_fields)
-            df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+            df = pd.DataFrame(ds_fields)
+            df.to_csv(csv_path, index=False, encoding="utf-8-sig")
             saved_files.append(csv_path)
-            logger.info(f"Saved {len(dataset_fields)} fields to {csv_path}")
+            logger.info(f"Saved {len(ds_fields)} fields to {csv_path}")
 
         return saved_files
 
+    # ── Operators ────────────────────────────────────────────────────
+
     def fetch_operators(self) -> List[Dict]:
-        """
-        Fetch all available operators from WQ Brain API.
-
-        Returns:
-            List of operator dicts
-        """
+        """Fetch all available operators."""
         logger.info("Fetching operators...")
-
         url = "https://api.worldquantbrain.com/operators"
 
         try:
-            resp = self._requests_session.get(url, verify=False, timeout=60)
-
+            resp = self._session.get(url, verify=False, timeout=60)
             if resp.status_code != 200:
                 logger.warning(f"Failed to fetch operators: {resp.status_code}")
                 return []
 
-            # API returns a list directly
             operators_raw = resp.json()
-
             if not isinstance(operators_raw, list):
-                logger.warning("Unexpected response format")
                 return []
 
             operators = []
@@ -238,8 +287,6 @@ class DataFetcher:
                     "Scope": ", ".join(item.get("scope", [])),
                     "Definition": item.get("definition", ""),
                     "Description": item.get("description", ""),
-                    "Level": item.get("level", ""),
-                    "Documentation": item.get("documentation", "")
                 })
 
             logger.info(f"Fetched {len(operators)} operators")
@@ -250,41 +297,29 @@ class DataFetcher:
             return []
 
     def save_operators_to_csv(self, operators: List[Dict]) -> str:
-        """
-        Save operators to CSV file.
-
-        Returns:
-            Path to saved file
-        """
+        """Save operators to CSV file."""
         if not operators:
-            logger.warning("No operators to save")
             return ""
 
         df = pd.DataFrame(operators)
         csv_path = os.path.join(OPERATORS_DIR, "operators.csv")
-        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
         logger.info(f"Saved {len(operators)} operators to {csv_path}")
-
         return csv_path
+
+    # ── Combined fetch ───────────────────────────────────────────────
 
     def fetch_and_save_all(
         self,
         region: str = "USA",
-        universe: str = "TOP3000"
-    ) -> Dict[str, List[str]]:
-        """
-        Fetch and save all data fields and operators.
-
-        Returns:
-            Dict with 'fields' and 'operators' file paths
-        """
+        universe: str = "TOP3000",
+    ) -> Dict[str, object]:
+        """Fetch and save all data fields and operators."""
         result = {"fields": [], "operators": ""}
 
-        # Fetch and save fields
         fields = self.fetch_all_fields(region=region, universe=universe)
         result["fields"] = self.save_fields_to_csv(fields)
 
-        # Fetch and save operators
         operators = self.fetch_operators()
         result["operators"] = self.save_operators_to_csv(operators)
 
@@ -293,68 +328,33 @@ class DataFetcher:
     def get_field_summary(self) -> Dict[str, int]:
         """Get summary of saved fields by file."""
         summary = {}
-
         if not os.path.exists(FIELDS_DIR):
             return summary
 
         for file in sorted(os.listdir(FIELDS_DIR)):
             if file.endswith(".csv"):
-                category = file.replace(".csv", "")
                 try:
                     df = pd.read_csv(os.path.join(FIELDS_DIR, file))
-                    summary[category] = len(df)
+                    summary[file.replace(".csv", "")] = len(df)
                 except Exception:
                     pass
-
         return summary
-
-    def get_operator_summary(self) -> Dict[str, int]:
-        """Get summary of saved operators by category."""
-        csv_path = os.path.join(OPERATORS_DIR, "operators.csv")
-
-        if not os.path.exists(csv_path):
-            return {}
-
-        try:
-            df = pd.read_csv(csv_path)
-            return df['Category'].value_counts().to_dict()
-        except Exception:
-            return {}
 
 
 def fetch_and_save_all(
     region: str = "USA",
     universe: str = "TOP3000",
-    session=None
-) -> Dict[str, List[str]]:
-    """
-    Convenience function to fetch and save all data.
-
-    Returns:
-        Dict with 'fields' and 'operators' file paths
-    """
+    session=None,
+) -> Dict[str, object]:
+    """Convenience function to fetch and save all data."""
     fetcher = DataFetcher(session=session)
     return fetcher.fetch_and_save_all(region=region, universe=universe)
 
 
 if __name__ == "__main__":
-    # Test the fetcher
     logging.basicConfig(level=logging.INFO)
-
-    from api_session import get_session
-    session = get_session()
-
-    fetcher = DataFetcher(session)
-    result = fetcher.fetch_and_save_all()
+    result = fetch_and_save_all()
 
     print("\n=== Summary ===")
     print(f"Fields saved: {len(result['fields'])} files")
     print(f"Operators saved: {result['operators']}")
-
-    print("\nField counts by dataset:")
-    for dataset, count in fetcher.get_field_summary().items():
-        print(f"  {dataset}.csv: {count} fields")
-
-    print("\nOperator counts by category:")
-    for category, count in fetcher.get_operator_summary().items():
-        print(f"  {category}: {count}")

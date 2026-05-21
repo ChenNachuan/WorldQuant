@@ -88,14 +88,24 @@ FIELDS_DIR = os.path.join(DATA_DIR, "fields")
 OPERATORS_DIR = os.path.join(DATA_DIR, "operators")
 SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
 
-# Target field files to load (matching IQC approach)
-# Note: options.csv removed - contains invalid field names, options fields are in price&volume.csv
+# Target field files to load (API-fetched dataset files)
 TARGET_FIELD_FILES = [
-    "price&volume.csv",
-    "fundamental.csv",
-    "analyst.csv",
-    "sentiment.csv",
-    "model.csv"
+    "analyst4.csv",
+    "fundamental2.csv",
+    "fundamental6.csv",
+    "model16.csv",
+    "model51.csv",
+    "model77.csv",
+    "news12.csv",
+    "news18.csv",
+    "option8.csv",
+    "option9.csv",
+    "pv1.csv",
+    "pv13.csv",
+    "sentiment1.csv",
+    "socialmedia12.csv",
+    "socialmedia8.csv",
+    "univ1.csv",
 ]
 
 
@@ -129,13 +139,23 @@ class AlphaMiner:
         }
 
         # Dynamic module weights (reinforcement learning style)
-        # Note: OPTIONS removed - fields are in price&volume.csv
         self.module_stats = {
-            "PRICE&VOLUME": {"tried": 0, "success": 0},
-            "FUNDAMENTAL": {"tried": 0, "success": 0},
-            "ANALYST": {"tried": 0, "success": 0},
-            "SENTIMENT": {"tried": 0, "success": 0},
-            "MODEL": {"tried": 0, "success": 0}
+            "ANALYST4": {"tried": 0, "success": 0},
+            "FUNDAMENTAL2": {"tried": 0, "success": 0},
+            "FUNDAMENTAL6": {"tried": 0, "success": 0},
+            "MODEL16": {"tried": 0, "success": 0},
+            "MODEL51": {"tried": 0, "success": 0},
+            "MODEL77": {"tried": 0, "success": 0},
+            "NEWS12": {"tried": 0, "success": 0},
+            "NEWS18": {"tried": 0, "success": 0},
+            "OPTION8": {"tried": 0, "success": 0},
+            "OPTION9": {"tried": 0, "success": 0},
+            "PV1": {"tried": 0, "success": 0},
+            "PV13": {"tried": 0, "success": 0},
+            "SENTIMENT1": {"tried": 0, "success": 0},
+            "SOCIALMEDIA12": {"tried": 0, "success": 0},
+            "SOCIALMEDIA8": {"tried": 0, "success": 0},
+            "UNIV1": {"tried": 0, "success": 0},
         }
 
         # Operator knowledge base
@@ -210,16 +230,15 @@ class AlphaMiner:
     # ==========================================
 
     def load_fields_from_csvs(self) -> Dict[str, List[Dict]]:
-        """Load field data from specified CSV files (matching IQC approach)."""
+        """Load ALL field data from specified CSV files (full pool for sampling)."""
         import pandas as pd
 
-        selected_fields = {}
+        all_fields = {}
 
         if not os.path.exists(FIELDS_DIR):
             logger.info("Fields directory not found, using default fields")
             return self._get_default_fields()
 
-        # Only load target files (matching IQC approach)
         for file in TARGET_FIELD_FILES:
             filepath = os.path.join(FIELDS_DIR, file)
             if not os.path.exists(filepath):
@@ -228,26 +247,24 @@ class AlphaMiner:
 
             try:
                 df = pd.read_csv(filepath)
-                # Get top 10 fields with Field and Description columns
                 if 'Field' in df.columns and 'Description' in df.columns:
-                    top_10 = df.head(10)[['Field', 'Description']].to_dict(orient='records')
+                    fields = df[['Field', 'Description']].to_dict(orient='records')
                     category = file.replace(".csv", "").upper()
-                    selected_fields[category] = top_10
-                    logger.info(f"Loaded {len(top_10)} fields from {file}")
+                    all_fields[category] = fields
+                    logger.info(f"Loaded {len(fields)} fields from {file}")
             except Exception as e:
                 logger.warning(f"Failed to load {file}: {e}")
 
-        # If no CSV files found, use defaults
-        if not selected_fields:
+        if not all_fields:
             logger.info("No target CSV files found, using default fields")
-            selected_fields = self._get_default_fields()
+            all_fields = self._get_default_fields()
 
-        return selected_fields
+        return all_fields
 
     def _get_default_fields(self) -> Dict[str, List[Dict]]:
         """Get default field data for alpha generation."""
         return {
-            "PRICE&VOLUME": [
+            "PV13": [
                 {"Field": "close", "Description": "收盘价"},
                 {"Field": "open", "Description": "开盘价"},
                 {"Field": "high", "Description": "最高价"},
@@ -256,7 +273,7 @@ class AlphaMiner:
                 {"Field": "returns", "Description": "收益率"},
                 {"Field": "vwap", "Description": "成交量加权平均价"}
             ],
-            "FUNDAMENTAL": [
+            "FUNDAMENTAL6": [
                 {"Field": "market_cap", "Description": "市值"},
                 {"Field": "pe_ratio", "Description": "市盈率"},
                 {"Field": "pb_ratio", "Description": "市净率"},
@@ -268,9 +285,10 @@ class AlphaMiner:
     # Dynamic Module Weights
     # ==========================================
 
-    def get_dynamic_modules(self, fields_data: Dict) -> tuple:
+    def get_dynamic_modules(self, fields_pool: Dict, sample_size: int = 15) -> tuple:
         """
-        Select 1-2 modules based on historical success rates.
+        Select 1-2 modules based on historical success rates,
+        then randomly sample fields from selected modules.
         Returns (selected_fields, modules_used)
         """
         # Check if we have enough data to use weighted selection
@@ -278,10 +296,8 @@ class AlphaMiner:
         modules = list(self.module_stats.keys())
 
         if not ready:
-            # Equal weights until we have enough data
             weights = [1.0] * len(modules)
         else:
-            # Calculate win rates, minimum 0.1 base weight
             weights = [
                 max(0.1, stat['success'] / max(1, stat['tried']))
                 for stat in self.module_stats.values()
@@ -290,10 +306,14 @@ class AlphaMiner:
         # Select 1 or 2 modules
         num_to_select = random.choice([1, 2])
         selected = random.choices(modules, weights=weights, k=num_to_select)
-        selected = list(set(selected))  # Remove duplicates
+        selected = list(set(selected))
 
-        # Get fields for selected modules
-        selected_fields = {mod: fields_data.get(mod, []) for mod in selected}
+        # Random sample fields from selected modules each time
+        selected_fields = {}
+        for mod in selected:
+            pool = fields_pool.get(mod, [])
+            n = min(sample_size, len(pool))
+            selected_fields[mod] = random.sample(pool, n) if n > 0 else []
 
         return selected_fields, selected
 
