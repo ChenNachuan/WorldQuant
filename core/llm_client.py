@@ -188,6 +188,13 @@ DEFAULT_SYSTEM_PROMPT = """你是一名 WorldQuant 顶级量化架构师。
    - 时序双参数+窗口：ts_corr(x,y,d), ts_covariance(y,x,d)
    - 逻辑：if_else(condition, true_val, false_val), trade_when(condition, x, y)
    - 错误示例：rank(a,b) ❌ → 正确：rank(a/b) ✓
+8. 绝对禁止使用字符串字面量！WorldQuant 不支持字符串比较。
+   - ❌ 错误：if_else(field == "revision", x, y)
+   - ❌ 错误：if_else(field > "value", x, y)
+   - ✓ 正确：if_else(field > 0, x, y)
+   - ✓ 正确：trade_when(field > threshold, x, y)
+   - 所有条件必须是数值比较（>, <, ==, >=, <=, !=）
+9. 绝对禁止在表达式中使用双引号或单引号！表达式只能包含数字、变量名和运算符。
 """
 
 

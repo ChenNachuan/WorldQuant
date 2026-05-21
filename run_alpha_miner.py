@@ -461,20 +461,32 @@ class AlphaMiner:
         }
 
         try:
-            # Submit simulation
-            resp = self.session.post(
-                f"{BASE_URL}/simulations",
-                json=payload,
-                verify=False,
-                timeout=30
-            )
+            # Submit simulation with retry for concurrent limit
+            for attempt in range(3):
+                resp = self.session.post(
+                    f"{BASE_URL}/simulations",
+                    json=payload,
+                    verify=False,
+                    timeout=30
+                )
 
-            # Handle auth failures
-            if resp.status_code in [401, 403] or "Incorrect authentication" in resp.text:
-                return {"error": "AUTH_FAILED"}
+                # Handle auth failures
+                if resp.status_code in [401, 403] or "Incorrect authentication" in resp.text:
+                    return {"error": "AUTH_FAILED"}
 
-            if resp.status_code != 201:
-                return {"error": f"Simulation failed: {resp.text[:200]}"}
+                # Handle concurrent limit
+                if "CONCURRENT_SIMULATION_LIMIT_EXCEEDED" in resp.text:
+                    wait_time = 30 * (attempt + 1)
+                    logger.warning(f"Concurrent limit hit, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                if resp.status_code != 201:
+                    return {"error": f"Simulation failed: {resp.text[:200]}"}
+
+                break
+            else:
+                return {"error": "Max retries exceeded"}
 
             # Get simulation ID from Location header
             sim_id = resp.headers.get("Location", "").split("/")[-1]
