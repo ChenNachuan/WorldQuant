@@ -364,10 +364,15 @@ class AlphaMiner:
 
         logger.info(f"Generating alphas for modules: {mod_names}")
 
-        prompt = f"""请利用以下提供的数据字段，进行模块内部或模块之间的交叉组合，
-生成 5 个具有爆发力的全新因子。必须使用真实的字段名。
+        prompt = f"""请利用以下提供的数据字段，生成 5 个具有爆发力的全新因子。
 
-可用字段: {json.dumps(target_fields, ensure_ascii=False)}"""
+【重要规则】
+1. 只能使用下面列出的字段名，绝对不能使用其他字段名！
+2. 不能使用 total_assets, book_value_per_share, return_on_equity 等不存在的字段
+3. 如果需要总资产，用 assets；如果需要权益，用 equity；如果需要长期负债，用 debt_lt
+
+可用字段列表:
+{json.dumps(target_fields, ensure_ascii=False)}"""
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
 
