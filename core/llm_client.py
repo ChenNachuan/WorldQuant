@@ -183,7 +183,12 @@ DEFAULT_SYSTEM_PROMPT = """你是一名 WorldQuant 顶级量化架构师。
 5. JSON 结构必须为: [{"logic": "描述", "expression": "代码", "settings": {"delay":1, "neutralization":"INDUSTRY", "truncation":0.08, "pasteurization":"ON"}}]
    - neutralization 只能是以下值之一: "NONE", "INDUSTRY", "SUBINDUSTRY", "SECTOR", "MARKET"
    - 绝对不能使用 "STYLE", "COUNTRY" 等其他值！
-6. 事件字段（如 nws_*, snt_*, scl_*_buzz* 等）不能参与算术运算（+,-,*,/），只能用于 trade_when 或 if_else 条件判断。
+6. 事件字段（如 nws_*, snt_*, scl_*_buzz*, rp_* 等）是 VECTOR 类型，有严格限制：
+   - ❌ 绝对不能用 > < >= <= 比较！如 if_else(nws12_xxx > 0, ...) 是错误的！
+   - ❌ 不能参与算术运算（+,-,*,/）
+   - ✓ 只能用 == 或 != 判断：if_else(field == 1, x, y)
+   - ✓ 或用 sign() 转换后再比较：if_else(sign(field) == 1, x, y)
+   - ✓ 或直接作为 trade_when 的条件（不加比较）：trade_when(field, x, y)
 7. 运算符参数必须严格遵守：
    - 单参数：rank(x), sign(x), abs(x), log(x), zscore(x), inverse(x), sqrt(x)
    - 时序单参数+窗口：ts_rank(x,d), ts_zscore(x,d), ts_mean(x,d), ts_std_dev(x,d), ts_sum(x,d), ts_delta(x,d), ts_delay(x,d), ts_decay_linear(x,d)
