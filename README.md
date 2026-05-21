@@ -6,11 +6,13 @@
 
 - **双 LLM 支持** — 同时支持 DeepSeek API 和本地 Ollama 模型
 - **动态赛道权重** — 强化学习风格的模块选择，按成功率动态调整
+- **随机字段采样** — 每次从 7,642 个字段中随机抽取 15 个，最大化探索范围
 - **非线性基因重组** — 20% 概率从共享池提取精英因子，使用 ts_corr、ts_cov、rank 等非线性算子杂交，避免相关性检测失败
 - **参数调优** — 检查失败时自动尝试 4 组代表性参数组合（中性化、截断、衰减）
 - **智能挽救池** — 边界因子自动进入挽救池，针对性修复失败检查，最多尝试 3 次
 - **反向因子检测** — Sharpe < -0.8 时自动加负号重测
 - **共享因子池** — 支持团队协作，防冲突的分布式因子池
+- **飞书通知** — 发现 Alpha、定期汇总、异常熔断时自动推送飞书消息
 - **严格筛选** — 只保存符合条件的因子（Sharpe ≥ 1.25, Fitness ≥ 1.0, 所有 checks 通过）
 - **手动提交** — 不自动提交，通过独立脚本手动控制提交
 
@@ -52,30 +54,16 @@ OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
 ```
 
-### 3. 获取运算符
+### 3. 获取数据字段和运算符
 
 ```bash
-# 从 WQ Brain API 获取所有可用运算符
+# 从 WQ Brain API 获取所有可用数据字段和运算符
 python fetch_fields.py
 ```
 
-运算符会保存到 `data/operators/operators.csv`
+数据字段会保存到 `data/fields/` 目录（16 个 CSV 文件，共 7,642 个字段），运算符保存到 `data/operators/operators.csv`。
 
-### 4. 添加数据字段
-
-数据字段需要手动添加到 `data/fields/` 目录，CSV 文件需要包含 `Field` 和 `Description` 列：
-
-```bash
-# 示例：创建 price.csv
-echo "Field,Description
-close,收盘价
-open,开盘价
-high,最高价
-low,最低价
-volume,成交量" > data/fields/price.csv
-```
-
-### 5. 启动挖掘
+### 4. 启动挖掘
 
 ```bash
 # 使用 DeepSeek API（默认）
@@ -92,7 +80,7 @@ python run_alpha_miner.py --member-id gao
 python run_alpha_miner.py --workers 3
 ```
 
-### 6. 提交因子
+### 5. 提交因子
 
 挖掘出的因子会自动保存到数据库（状态为 "unsubmitted"），使用以下命令提交：
 
@@ -106,7 +94,7 @@ python submit_alpha.py pwnbR9Gq akNmojM1
 
 提交时会检查所有条件，失败会显示详细原因并从数据库删除。
 
-### 7. 手动添加因子
+### 6. 手动添加因子
 
 从 WorldQuant Brain 添加已知因子到数据库：
 
@@ -125,20 +113,24 @@ WorldQuant/
 │   ├── alpha_db.py                # SQLite Alpha 数据库
 │   ├── llm_client.py              # 统一 LLM 客户端（Ollama + DeepSeek）
 │   ├── submission_quota.py        # 每日提交配额追踪
-│   └── log_manager.py             # 日志管理
+│   ├── notifier.py                # 飞书通知模块
+│   ├── data_fetcher.py            # 数据字段和运算符获取
+│   └── log_manager.py             # 日志管理（按天轮转）
 ├── data/                          # 运行时数据
-│   ├── fields/                    # 数据字段 CSV（按类别分组）
-│   │   ├── price&volume.csv
-│   │   ├── fundamental.csv
-│   │   ├── analyst.csv
-│   │   └── sentiment.csv
+│   ├── fields/                    # 数据字段 CSV（API 获取，16 个文件）
+│   │   ├── analyst4.csv           # 分析师预估数据
+│   │   ├── fundamental6.csv       # 公司基本面数据
+│   │   ├── model77.csv            # 因子模型
+│   │   ├── pv13.csv               # 价格与成交量
+│   │   └── ...                    # 共 16 个数据集
 │   ├── operators/                 # 运算符数据
 │   │   └── operators.csv
 │   └── shared_pool/               # 共享因子池（团队协作）
+├── log/                           # 日志文件（按天自动轮转）
 ├── run_alpha_miner.py             # 主挖掘程序
 ├── submit_alpha.py                # 因子提交脚本
 ├── add_alpha.py                   # 手动添加因子脚本
-├── fetch_fields.py                # 字段获取脚本
+├── fetch_fields.py                # 字段和运算符获取脚本
 ├── .env.example                   # 环境变量示例
 └── README.md                      # 本文件
 ```
@@ -147,29 +139,24 @@ WorldQuant/
 
 ### 1. 字段加载
 
-系统从 `data/fields/` 目录读取 CSV 文件，每个文件代表一个数据类别：
-- `price&volume.csv` — 价格和成交量相关字段
-- `fundamental.csv` — 基本面字段
-- `analyst.csv` — 分析师数据
-- `sentiment.csv` — 情绪指标
+系统启动时从 `data/fields/` 目录加载全部 16 个数据集的字段（共 7,642 个），存储在内存中作为字段池。
 
-### 2. 动态模块选择
+数据集包括：
+- `analyst4.csv` — 分析师预估数据（1,325 字段）
+- `fundamental6.csv` — 公司基本面数据（887 字段）
+- `model77.csv` — 因子模型（3,257 字段）
+- `pv13.csv` — 价格与成交量（166 字段）
+- `news12.csv` — 新闻数据（876 字段）
+- 等共 16 个数据集
 
-系统维护 5 个模块的统计数据：
-```python
-MODULE_STATS = {
-    "PRICE&VOLUME": {"tried": 0, "success": 0},
-    "FUNDAMENTAL": {"tried": 0, "success": 0},
-    "ANALYST": {"tried": 0, "success": 0},
-    "SENTIMENT": {"tried": 0, "success": 0},
-    "MODEL": {"tried": 0, "success": 0}
-}
-```
+### 2. 动态模块选择与随机采样
 
-每次生成时：
-- 根据成功率计算权重
-- 随机选择 1-2 个模块进行交叉组合
-- 成功率高的模块被选中概率更大
+系统维护 16 个模块的统计数据，每次生成时：
+1. 根据成功率计算权重，随机选择 1-2 个模块
+2. 从选中模块的字段池中**随机抽取 15 个字段**（每次不同）
+3. 成功率高的模块被选中概率更大
+
+这确保了每次生成都使用不同的字段组合，最大化探索范围。
 
 ### 3. Alpha 生成策略
 
@@ -261,7 +248,9 @@ python add_alpha.py <alpha_id> [alpha_id2 ...]
 
 ### fetch_fields.py
 
-从 WQ Brain API 获取运算符并保存到 `data/operators/operators.csv`
+从 WQ Brain API 获取数据字段和运算符：
+- 数据字段保存到 `data/fields/`（16 个 CSV 文件）
+- 运算符保存到 `data/operators/operators.csv`
 
 ## 环境变量
 
@@ -272,15 +261,28 @@ python add_alpha.py <alpha_id> [alpha_id2 ...]
 | `DEEPSEEK_API_KEY` | 否 | DeepSeek API Key（使用 DeepSeek 时必需） |
 | `OLLAMA_URL` | 否 | Ollama API 地址（默认 `http://localhost:11434`） |
 | `OLLAMA_MODEL` | 否 | Ollama 模型名称（默认 `qwen3:8b`） |
+| `FEISHU_WEBHOOK` | 否 | 飞书机器人 Webhook URL（接收通知） |
 
 ## 使用 DeepSeek API
 
 DeepSeek API 是推荐的选择，因为：
 - 无需本地 GPU
 - 响应速度快
-- 支持 DeepSeek Reasoner 模型
+- 支持 DeepSeek v4-pro 模型
 
 获取 API Key：https://platform.deepseek.com/
+
+## 飞书通知
+
+配置 `FEISHU_WEBHOOK` 环境变量后，系统会在以下情况自动推送飞书消息：
+
+- **发现 Alpha**：Sharpe ≥ 1.25 且 Fitness ≥ 1.0
+- **定期汇总**：每测试 100 个因子后发送统计摘要
+- **异常熔断**：连续 3 次认证失败或连续 5 次 LLM 错误时报警
+
+配置方法：
+1. 飞书群 → 设置 → 机器人 → 添加自定义机器人
+2. 复制 Webhook URL 到 `.env` 的 `FEISHU_WEBHOOK`
 
 ## 使用 Ollama 本地模型
 
@@ -338,13 +340,23 @@ python run_alpha_miner.py --member-id bob
 - 失败会显示详细原因（如 SELF_CORRELATION 失败）
 - 失败的因子会自动从数据库删除
 
+## 日志
+
+日志文件保存在 `log/` 目录，按天自动轮转：
+- 当前日志：`log/YYYY-MM-DD.log`
+- 自动在午夜切换到新文件
+- 保留最近 30 天的日志
+
 ## 开发说明
 
-### 添加新的数据字段
+### 更新数据字段
 
-1. 将字段信息保存为 CSV 文件到 `data/fields/` 目录
-2. CSV 需要包含 `Field` 和 `Description` 列
-3. 系统会自动加载并使用
+```bash
+# 从 API 获取最新的数据字段和运算符
+python fetch_fields.py
+```
+
+字段会自动保存到 `data/fields/` 目录，程序启动时自动加载。
 
 ### 自定义 Alpha 生成策略
 

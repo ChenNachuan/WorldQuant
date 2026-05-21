@@ -88,6 +88,16 @@ FIELDS_DIR = os.path.join(DATA_DIR, "fields")
 OPERATORS_DIR = os.path.join(DATA_DIR, "operators")
 SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
 
+
+def clean_expression(expr: str) -> str:
+    """Fix common LLM mistakes in expressions."""
+    # Replace logical operators: and/or/not -> &/|/~
+    # Use word boundaries to avoid replacing inside field names
+    expr = re.sub(r'\band\b', '&', expr)
+    expr = re.sub(r'\bor\b', '|', expr)
+    expr = re.sub(r'\bnot\b', '~', expr)
+    return expr
+
 # Target field files to load (API-fetched dataset files)
 TARGET_FIELD_FILES = [
     "analyst4.csv",
@@ -403,8 +413,9 @@ class AlphaMiner:
         else:
             self.notifier.record_llm_error()
 
-        # Tag results with modules used
+        # Clean expressions and tag with modules used
         for res in results:
+            res['expression'] = clean_expression(res.get('expression', ''))
             res['modules_used'] = modules_used
 
         return results
@@ -450,8 +461,9 @@ class AlphaMiner:
         else:
             self.notifier.record_llm_error()
 
-        # Tag as crossover
+        # Clean expressions and tag as crossover
         for res in results:
+            res['expression'] = clean_expression(res.get('expression', ''))
             res['modules_used'] = []  # Crossover doesn't count for module stats
 
         return results
@@ -975,8 +987,9 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
         else:
             self.notifier.record_llm_error()
 
-        # Tag as rescue
+        # Clean expressions and tag as rescue
         for res in results:
+            res['expression'] = clean_expression(res.get('expression', ''))
             res['modules_used'] = modules_used
 
         logger.info(f"Generated {len(results)} rescue variants for alpha {alpha_id} (attempt {candidate['attempt_count'] + 1})")
