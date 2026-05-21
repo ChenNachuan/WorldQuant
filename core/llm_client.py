@@ -59,7 +59,7 @@ class LLMClient:
                 base_url="https://api.deepseek.com",
                 timeout=120.0
             )
-            self.model = "deepseek-reasoner"
+            self.model = "deepseek-v4-pro"
             logger.info("DeepSeek API client initialized")
         except ImportError:
             raise ImportError("openai package required for DeepSeek: pip install openai")

@@ -662,8 +662,9 @@ class AlphaMiner:
         turnover = result.get("turnover", 0)
         margin = result.get("margin", 0)
 
+        flipped_tag = " [FLIPPED]" if factor.get("flipped_from") else ""
         logger.info(
-            f"Result: S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f} M={margin:.2f} | "
+            f"Result: S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f} M={margin:.2f}{flipped_tag} | "
             f"{expression[:60]}..."
         )
 
@@ -754,6 +755,7 @@ class AlphaMiner:
             # Create flipped version
             flipped_factor = factor.copy()
             flipped_factor['expression'] = f"-1 * ({expression})"
+            flipped_factor['flipped_from'] = expression
             self.test_queue.put(flipped_factor)
 
         # Rescue mechanism for borderline alphas
