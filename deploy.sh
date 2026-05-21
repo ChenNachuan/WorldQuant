@@ -7,7 +7,7 @@
 #   ./deploy.sh submit   # 提交因子
 #   ./deploy.sh status   # 查看状态
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit
 
 case "${1:-start}" in
     start)
@@ -66,8 +66,8 @@ case "${1:-start}" in
             echo "提交所有未提交的因子..."
             docker compose run --rm submit python submit_alpha.py
         else
-            echo "提交因子: $@"
-            docker compose run --rm submit python submit_alpha.py $@
+            echo "提交因子: $*"
+            docker compose run --rm submit python submit_alpha.py "$@"
         fi
         ;;
 

@@ -15,7 +15,7 @@ import re
 import json
 import logging
 import time
-from typing import List, Dict, Optional, Set
+from typing import List, Dict
 
 import pandas as pd
 
@@ -338,6 +338,21 @@ class DataFetcher:
                     summary[file.replace(".csv", "")] = len(df)
                 except Exception:
                     pass
+        return summary
+
+    def get_operator_summary(self) -> Dict[str, int]:
+        """Get summary of saved operators by category."""
+        summary = {}
+        csv_path = os.path.join(OPERATORS_DIR, "operators.csv")
+        if not os.path.exists(csv_path):
+            return summary
+
+        try:
+            df = pd.read_csv(csv_path)
+            if "Category" in df.columns:
+                summary = df["Category"].value_counts().to_dict()
+        except Exception:
+            pass
         return summary
 
 

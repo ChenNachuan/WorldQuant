@@ -2,7 +2,7 @@
 # 一键启动 Alpha 挖掘器
 # Usage: ./mine.sh
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit
 
 echo "=========================================="
 echo "  WorldQuant Alpha 挖掘器"

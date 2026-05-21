@@ -5,7 +5,7 @@
 #   ./submit.sh 3        # 只提交前 3 个
 #   ./submit.sh 1        # 只提交 1 个
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit
 
 LIMIT=${1:-""}  # 第一个参数，如果没提供则为空
 
@@ -37,7 +37,7 @@ echo "=========================================="
 echo ""
 
 # 转换为参数列表并提交
-python submit_alpha.py $UNSUBMITTED
+python submit_alpha.py "$UNSUBMITTED"
 
 echo ""
 echo "=========================================="

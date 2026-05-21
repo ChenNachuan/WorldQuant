@@ -34,7 +34,7 @@ from core.submission_quota import get_submission_quota
 from core.llm_client import get_llm_client, DEFAULT_SYSTEM_PROMPT
 from core.notifier import get_notifier
 
-logger = setup_logger(__name__, "alpha_miner")
+logger = setup_logger(__name__)
 
 # Constants
 BASE_URL = "https://api.worldquantbrain.com"
