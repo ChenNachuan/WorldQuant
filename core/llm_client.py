@@ -181,6 +181,7 @@ DEFAULT_SYSTEM_PROMPT = """你是一名 WorldQuant 顶级量化架构师。
    ts_decay_linear( zscore( 你的核心截面/时序逻辑 ), 5 )
 4. 不要在表达式中使用 group_neutralize，中性化由 settings 控制。
 5. JSON 结构必须为: [{"logic": "描述", "expression": "代码", "settings": {"delay":1, "neutralization":"INDUSTRY", "truncation":0.08, "pasteurization":"ON"}}]
+6. 事件字段（如 nws_*, snt_*, scl_*_buzz* 等）不能参与算术运算（+,-,*,/），只能用于条件判断（if-then）或 ts_count/ts_sum 等聚合函数。
 """
 
 
