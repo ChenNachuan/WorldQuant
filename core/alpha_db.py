@@ -5,6 +5,7 @@ Alpha Database — SQLite-backed storage for all alpha backtesting results.
 import sqlite3
 import json
 import os
+import uuid
 import time
 import logging
 import threading
@@ -51,7 +52,7 @@ class AlphaDB:
         with self._cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS alphas (
-                    alpha_id TEXT,
+                    alpha_id TEXT PRIMARY KEY,
                     status TEXT DEFAULT 'tested',
                     grade TEXT,
                     expression TEXT NOT NULL,
@@ -60,7 +61,6 @@ class AlphaDB:
                     turnover REAL,
                     returns REAL,
                     margin REAL,
-                    pnl REAL,
                     long_count INTEGER,
                     short_count INTEGER,
                     drawdown REAL,
@@ -72,26 +72,13 @@ class AlphaDB:
                     neutralization TEXT DEFAULT 'INDUSTRY',
                     truncation REAL DEFAULT 0.08,
                     checks TEXT DEFAULT '[]',
-                    raw_json TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (expression, region, universe, neutralization)
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
 
-            # Upgrade existing DB with new columns if they don't exist
-            new_columns = [
-                ("pnl", "REAL"),
-                ("drawdown", "REAL"),
-                ("long_count", "INTEGER"),
-                ("short_count", "INTEGER"),
-                ("raw_json", "TEXT"),
-            ]
-            for col_name, col_type in new_columns:
-                try:
-                    cur.execute(f"ALTER TABLE alphas ADD COLUMN {col_name} {col_type}")
-                except sqlite3.OperationalError:
-                    pass  # Column already exists
-
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alpha_expression ON alphas(expression, region, universe, neutralization)"
+            )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_alpha_fitness ON alphas(fitness)"
             )
@@ -131,7 +118,6 @@ class AlphaDB:
         turnover: float = None,
         margin: float = None,
         returns: float = None,
-        pnl: float = None,
         long_count: int = None,
         short_count: int = None,
         drawdown: float = None,
@@ -144,45 +130,41 @@ class AlphaDB:
         decay: int = 0,
         neutralization: str = "NONE",
         truncation: float = 0.08,
-        raw_json: str = None,
         status: str = "tested",
     ) -> int:
         """Save an alpha result. Returns 1 if successful."""
+        if not alpha_id:
+            alpha_id = str(uuid.uuid4())[:8]
+
         checks_json = json.dumps(checks) if checks else "[]"
         with self._cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO alphas (
-                    expression, alpha_id, fitness, sharpe, turnover,
-                    margin, returns, pnl, long_count, short_count,
+                    alpha_id, expression, fitness, sharpe, turnover,
+                    margin, returns, long_count, short_count,
                     drawdown, grade, checks, source, region, universe,
-                    delay, decay, neutralization, truncation, raw_json, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(expression, region, universe, neutralization) DO UPDATE SET
+                    delay, decay, neutralization, truncation, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(alpha_id) DO UPDATE SET
                     fitness=excluded.fitness,
                     sharpe=excluded.sharpe,
                     turnover=excluded.turnover,
                     margin=excluded.margin,
                     returns=excluded.returns,
-                    pnl=excluded.pnl,
                     long_count=excluded.long_count,
                     short_count=excluded.short_count,
                     drawdown=excluded.drawdown,
                     grade=excluded.grade,
                     checks=excluded.checks,
-                    alpha_id=excluded.alpha_id,
-                    delay=excluded.delay,
-                    decay=excluded.decay,
-                    truncation=excluded.truncation,
-                    raw_json=excluded.raw_json,
                     status=excluded.status,
                     created_at=CURRENT_TIMESTAMP
                 """,
                 (
-                    expression, alpha_id, fitness, sharpe, turnover,
-                    margin, returns, pnl, long_count, short_count,
+                    alpha_id, expression, fitness, sharpe, turnover,
+                    margin, returns, long_count, short_count,
                     drawdown, grade, checks_json, source, region, universe,
-                    delay, decay, neutralization, truncation, raw_json, status
+                    delay, decay, neutralization, truncation, status
                 ),
             )
             return 1

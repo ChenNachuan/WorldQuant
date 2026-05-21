@@ -48,7 +48,6 @@ def fetch_alpha_data(alpha_id: str) -> dict:
         "turnover": is_data.get("turnover", 0),
         "margin": is_data.get("margin", 0),
         "returns": is_data.get("returns", 0),
-        "pnl": is_data.get("pnl", 0),
         "long_count": is_data.get("longCount", 0),
         "short_count": is_data.get("shortCount", 0),
         "drawdown": is_data.get("drawdown", 0),
