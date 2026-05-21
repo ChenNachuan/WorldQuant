@@ -32,6 +32,7 @@ from core.log_manager import setup_logger
 from core.alpha_db import get_alpha_db
 from core.submission_quota import get_submission_quota
 from core.llm_client import get_llm_client, DEFAULT_SYSTEM_PROMPT
+from core.notifier import get_notifier
 
 logger = setup_logger(__name__, "alpha_miner")
 
@@ -106,6 +107,7 @@ class AlphaMiner:
         self.alpha_db = get_alpha_db()
         self.quota = get_submission_quota()
         self.member_id = member_id
+        self.notifier = get_notifier()
 
         # Session state
         self.session = None
@@ -376,6 +378,11 @@ class AlphaMiner:
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
 
+        if results:
+            self.notifier.record_llm_success()
+        else:
+            self.notifier.record_llm_error()
+
         # Tag results with modules used
         for res in results:
             res['modules_used'] = modules_used
@@ -417,6 +424,11 @@ class AlphaMiner:
 中性化由settings控制，表达式中不要包含group_neutralize"""
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
+
+        if results:
+            self.notifier.record_llm_success()
+        else:
+            self.notifier.record_llm_error()
 
         # Tag as crossover
         for res in results:
@@ -629,11 +641,17 @@ class AlphaMiner:
 
             # Handle auth failure
             if result["error"] == "AUTH_FAILED":
+                self.notifier.record_auth_failure()
                 logger.warning("Authentication expired, attempting re-login...")
                 if self.authenticate():
+                    self.notifier.record_auth_success()
                     self.test_queue.put(factor)  # Re-queue factor
                 else:
                     logger.error("Re-login failed, stopping")
+                    self.notifier.notify_fatal(
+                        "鉴权失败，重新登录也未成功。矿机已停止。",
+                        member_id=self.member_id,
+                    )
                     return False
             return True
 
@@ -693,6 +711,16 @@ class AlphaMiner:
                         logger.info(f"Discarding alpha {alpha_id} (non-rescuable checks: {failed_checks})")
             else:
                 logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f} (unsubmitted)")
+
+                # 飞书通知
+                self.notifier.notify_alpha(
+                    alpha_id=alpha_id or "N/A",
+                    sharpe=sharpe,
+                    fitness=fitness,
+                    turnover=turnover,
+                    expression=expression,
+                    member_id=self.member_id,
+                )
 
                 # Save to database as unsubmitted
                 self.alpha_db.add_alpha(
@@ -920,6 +948,11 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
 
+        if results:
+            self.notifier.record_llm_success()
+        else:
+            self.notifier.record_llm_error()
+
         # Tag as rescue
         for res in results:
             res['modules_used'] = modules_used
@@ -979,6 +1012,11 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
 中性化由settings控制，表达式中不要包含group_neutralize"""
 
         variants = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
+
+        if variants:
+            self.notifier.record_llm_success()
+        else:
+            self.notifier.record_llm_error()
 
         for variant in variants:
             if variant.get("expression"):
@@ -1063,6 +1101,20 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
                             f"best_sharpe={self.stats['best_sharpe']:.2f} | "
                             f"Module weights: {self.module_stats}"
                         )
+
+                        # 每 100 个因子发送汇总通知
+                        if self.stats["tested"] % 100 == 0:
+                            top_alphas = self.alpha_db.get_successful_alphas(limit=1)
+                            best_f = top_alphas[0]["fitness"] if top_alphas else 0
+                            self.notifier.notify_summary(
+                                tested=self.stats["tested"],
+                                passed=self.stats["passed"],
+                                failed=self.stats["failed"],
+                                best_sharpe=self.stats["best_sharpe"],
+                                best_fitness=best_f,
+                                rescue_pool=rescue_count,
+                                member_id=self.member_id,
+                            )
 
                 except KeyboardInterrupt:
                     logger.info("Received interrupt, shutting down...")
