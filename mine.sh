@@ -11,10 +11,10 @@ echo ""
 echo "正在启动..."
 echo "LLM: DeepSeek"
 echo "成员: nachuan"
-echo "并发: 3 workers"
+echo "并发: 2 workers"
 echo ""
 echo "按 Ctrl+C 停止"
 echo "=========================================="
 echo ""
 
-python run_alpha_miner.py --llm deepseek --member-id nachuan --workers 3
+python run_alpha_miner.py --llm deepseek --member-id nachuan --workers 2
