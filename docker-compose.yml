@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  miner:
+    build: .
+    container_name: wq-alpha-miner
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist data (database, shared pool, fields)
+      - ./data:/app/data
+      # Persist logs
+      - ./log:/app/log
+    command: python run_alpha_miner.py --llm deepseek --workers 3 --member-id nachuan
+
+  # Optional: Submit service (run manually)
+  submit:
+    build: .
+    container_name: wq-alpha-submit
+    profiles:
+      - submit
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: python submit_alpha.py
+    # Override with: docker compose run submit python submit_alpha.py <alpha_id>

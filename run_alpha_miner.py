@@ -12,10 +12,14 @@ import json
 import glob
 import queue
 import random
+import warnings
 import threading
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict
+
+# Suppress SSL verification warnings for WorldQuant Brain API
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

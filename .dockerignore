@@ -1,0 +1,39 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+dist
+build
+
+# Environment
+.env
+.env.*
+
+# Logs (will be mounted as volume)
+log/
+
+# Database (will be mounted as volume)
+data/alphas.db
+data/alphas.db-wal
+data/alphas.db-shm
+
+# Documentation
+README.md
+LICENSE
+
+# Shell scripts
+*.sh
+
+# Jupyter
+*.ipynb
