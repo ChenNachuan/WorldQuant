@@ -73,17 +73,18 @@ class Notifier:
         expression: str,
         member_id: str = "",
     ):
-        """发现 Alpha 时发送通知。"""
+        """发现符合条件的 Alpha 时发送通知。"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         expr_short = expression[:80] + ("..." if len(expression) > 80 else "")
         lines = [
-            "Sharpe: {:.2f} | Fitness: {:.2f} | Turnover: {:.2f}".format(
-                sharpe, fitness, turnover
-            ),
-            "Alpha ID: {}".format(alpha_id),
-            "Expression: {}".format(expr_short),
+            f"时间: {timestamp}",
+            f"Alpha ID: {alpha_id}",
+            f"Expression: {expr_short}",
+            f"Sharpe: {sharpe:.2f} | Fitness: {fitness:.2f} | Turnover: {turnover:.2f}",
         ]
         if member_id:
-            lines.append("Member: {}".format(member_id))
+            lines.append(f"Member: {member_id}")
         self.send("发现新 Alpha!", "\n".join(lines))
 
     # ── 定期汇总通知 ────────────────────────────────────────────────
