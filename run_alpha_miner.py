@@ -92,11 +92,10 @@ SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
 
 def clean_expression(expr: str) -> str:
     """Fix common LLM mistakes in expressions."""
-    # Replace logical operators: and/or/not -> &/|/~
-    # Use word boundaries to avoid replacing inside field names
-    expr = re.sub(r'\band\b', '&', expr)
-    expr = re.sub(r'\bor\b', '|', expr)
-    expr = re.sub(r'\bnot\b', '~', expr)
+    # WorldQuant Brain 使用函数形式的逻辑运算符：and(x,y), or(x,y), not(x)
+    # 不是中缀形式：x and y, x & y
+    # 暂时保留原样，因为简单的正则替换无法正确处理嵌套逻辑
+    # TODO: 添加更复杂的解析逻辑来转换中缀形式为函数形式
     return expr
 
 # Target field files to load (API-fetched dataset files)
@@ -204,6 +203,42 @@ class AlphaMiner:
             logger.warning(f"Failed to load operators: {e}")
             return {}
 
+    def validate_expression_variables(self, expression: str, available_fields: set) -> bool:
+        """验证表达式中的变量是否都存在于可用字段列表中"""
+        # 已知的运算符和内置变量
+        known_operators = set(self.operator_arity.keys()) if self.operator_arity else set()
+        builtin_vars = {
+            'returns', 'volume', 'close', 'open', 'high', 'low', 'vwap',
+            'adv20', 'adv50', 'adv120', 'adv240',
+            'market_cap', 'sector', 'industry', 'subindustry',
+            'liabilities', 'assets', 'equity', 'debt_lt', 'debt_st',
+        }
+
+        # 提取表达式中的所有标识符（变量名）
+        # 匹配字母开头，包含字母、数字、下划线的标识符
+        identifiers = set(re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', expression))
+
+        # 过滤掉运算符和内置变量
+        potential_fields = identifiers - known_operators - builtin_vars
+
+        # 检查每个潜在字段是否在可用字段列表中
+        unknown_fields = []
+        for field in potential_fields:
+            # 跳过数字开头的标识符（可能是常量）
+            if field[0].isdigit():
+                continue
+            # 跳过常见的非字段标识符
+            if field in {'true', 'false', 'null', 'nan', 'inf', 'e', 'pi'}:
+                continue
+            if field not in available_fields:
+                unknown_fields.append(field)
+
+        if unknown_fields:
+            logger.warning(f"Expression contains unknown fields: {unknown_fields}")
+            return False
+
+        return True
+
     def authenticate(self) -> bool:
         """Authenticate with WorldQuant Brain API."""
         import requests
@@ -259,7 +294,22 @@ class AlphaMiner:
             try:
                 df = pd.read_csv(filepath)
                 if 'Field' in df.columns and 'Description' in df.columns:
-                    fields = df[['Field', 'Description']].to_dict(orient='records')
+                    # 选择需要的列
+                    columns_to_keep = ['Field', 'Description']
+                    if 'Type' in df.columns:
+                        columns_to_keep.append('Type')
+                    if 'Alphas' in df.columns:
+                        columns_to_keep.append('Alphas')
+
+                    fields = df[columns_to_keep].to_dict(orient='records')
+
+                    # 填充默认值
+                    for field in fields:
+                        if 'Type' not in field:
+                            field['Type'] = 'MATRIX'
+                        if 'Alphas' not in field:
+                            field['Alphas'] = 0
+
                     category = file.replace(".csv", "").upper()
                     all_fields[category] = fields
                     logger.info(f"Loaded {len(fields)} fields from {file}")
@@ -298,33 +348,43 @@ class AlphaMiner:
 
     def get_dynamic_modules(self, fields_pool: Dict, sample_size: int = 15) -> tuple:
         """
-        Select 1-2 modules based on historical success rates,
-        then randomly sample fields from selected modules.
+        Select 1-2 modules based on alpha counts,
+        then sample fields based on alpha counts.
         Returns (selected_fields, modules_used)
         """
-        # Check if we have enough data to use weighted selection
-        ready = all(stat['success'] >= 2 for stat in self.module_stats.values())
-        modules = list(self.module_stats.keys())
+        # 计算每个数据集的总 alpha 数量
+        module_alpha_counts = {}
+        for mod, fields in fields_pool.items():
+            total_alphas = sum(f.get('Alphas', 0) for f in fields)
+            module_alpha_counts[mod] = total_alphas
 
-        if not ready:
+        # 根据 alpha 数量加权选择数据集
+        modules = list(fields_pool.keys())
+        weights = [module_alpha_counts.get(mod, 0) for mod in modules]
+
+        # 如果所有权重为0，使用均匀分布
+        if sum(weights) == 0:
             weights = [1.0] * len(modules)
-        else:
-            weights = [
-                max(0.1, stat['success'] / max(1, stat['tried']))
-                for stat in self.module_stats.values()
-            ]
 
         # Select 1 or 2 modules
         num_to_select = random.choice([1, 2])
         selected = random.choices(modules, weights=weights, k=num_to_select)
         selected = list(set(selected))
 
-        # Random sample fields from selected modules each time
+        # 在选定的数据集中，根据 alpha 数量加权选择字段
         selected_fields = {}
         for mod in selected:
             pool = fields_pool.get(mod, [])
+            if not pool:
+                continue
+
+            # 根据 alpha 数量加权选择字段
+            field_weights = [f.get('Alphas', 0) for f in pool]
+            if sum(field_weights) == 0:
+                field_weights = [1.0] * len(pool)
+
             n = min(sample_size, len(pool))
-            selected_fields[mod] = random.sample(pool, n) if n > 0 else []
+            selected_fields[mod] = random.choices(pool, weights=field_weights, k=n)
 
         return selected_fields, selected
 
@@ -397,15 +457,42 @@ class AlphaMiner:
 
         logger.info(f"Generating alphas for modules: {mod_names}")
 
+        # 分离 MATRIX 和 VECTOR 字段
+        matrix_fields = {}
+        vector_fields = {}
+        for mod, fields in target_fields.items():
+            matrix_list = [f for f in fields if f.get('Type', 'MATRIX') == 'MATRIX']
+            vector_list = [f for f in fields if f.get('Type', 'MATRIX') == 'VECTOR']
+            if matrix_list:
+                matrix_fields[mod] = matrix_list
+            if vector_list:
+                vector_fields[mod] = vector_list
+
+        # 构建字段说明
+        field_description = "【MATRIX 字段】（可正常使用所有运算符）:\n"
+        field_description += json.dumps(matrix_fields, ensure_ascii=False)
+
+        if vector_fields:
+            field_description += "\n\n【VECTOR 字段】（event 类型，有严格限制）:\n"
+            field_description += json.dumps(vector_fields, ensure_ascii=False)
+            field_description += """
+VECTOR 字段使用限制：
+- ❌ 绝对不能用 > < >= <= 比较！
+- ❌ 不能参与算术运算（+,-,*,/）
+- ❌ 不能用 ts_delta, ts_mean, ts_sum, rank, sign 等运算符
+- ✓ 只能用 == 或 != 判断：if_else(field == 1, x, y)
+- ✓ 或用 sign() 转换后再比较：if_else(sign(field) == 1, x, y)
+- ✓ 或直接作为 trade_when 的条件：trade_when(field, x, y)"""
+
         prompt = f"""请利用以下提供的数据字段，生成 5 个具有爆发力的全新因子。
 
 【重要规则】
 1. 只能使用下面列出的字段名，绝对不能使用其他字段名！
 2. 不能使用 total_assets, book_value_per_share, return_on_equity 等不存在的字段
 3. 如果需要总资产，用 assets；如果需要权益，用 equity；如果需要长期负债，用 debt_lt
+4. 逻辑运算符必须使用函数形式：and(x,y), or(x,y), not(x)，禁止使用 & | ~ 或中缀形式
 
-可用字段列表:
-{json.dumps(target_fields, ensure_ascii=False)}"""
+{field_description}"""
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
 
@@ -414,12 +501,29 @@ class AlphaMiner:
         else:
             self.notifier.record_llm_error()
 
-        # Clean expressions and tag with modules used
-        for res in results:
-            res['expression'] = clean_expression(res.get('expression', ''))
-            res['modules_used'] = modules_used
+        # 构建可用字段集合（用于验证）
+        available_fields = set()
+        for mod, fields in target_fields.items():
+            for field in fields:
+                available_fields.add(field['Field'])
 
-        return results
+        # Clean expressions, validate variables, and tag with modules used
+        valid_results = []
+        for res in results:
+            expression = res.get('expression', '')
+            if not expression:
+                continue
+
+            # 验证变量
+            if not self.validate_expression_variables(expression, available_fields):
+                logger.warning(f"Skipping expression with unknown variables: {expression[:60]}...")
+                continue
+
+            res['expression'] = clean_expression(expression)
+            res['modules_used'] = modules_used
+            valid_results.append(res)
+
+        return valid_results
 
     def generate_crossover_alphas(self) -> List[Dict]:
         """Generate alphas by crossing over elite factors from shared pool using non-linear operations."""
@@ -688,12 +792,12 @@ class AlphaMiner:
                     return False
             return True
 
-        # Extract metrics
-        sharpe = result.get("sharpe", 0)
-        fitness = result.get("fitness", 0)
+        # Extract metrics (with None value protection)
+        sharpe = result.get("sharpe", 0) or 0
+        fitness = result.get("fitness", 0) or 0
         alpha_id = result.get("alpha_id")
-        turnover = result.get("turnover", 0)
-        margin = result.get("margin", 0)
+        turnover = result.get("turnover", 0) or 0
+        margin = result.get("margin", 0) or 0
 
         flipped_tag = " [FLIPPED]" if factor.get("flipped_from") else ""
         logger.info(

@@ -202,12 +202,13 @@ DEFAULT_SYSTEM_PROMPT = """你是一名 WorldQuant 顶级量化架构师。
    - ✓ 正确：trade_when(field > threshold, x, y)
    - 所有条件必须是数值比较（>, <, ==, >=, <=, !=）
 9. 绝对禁止在表达式中使用双引号或单引号！表达式只能包含数字、变量名和运算符。
-10. 逻辑运算符必须使用符号，禁止使用英文单词：
-    - 逻辑与：& （不是 and）
-    - 逻辑或：| （不是 or）
-    - 逻辑非：~ （不是 not）
-    - ✓ 正确：if_else(x > 0 & y > 0, a, b)
-    - ❌ 错误：if_else(x > 0 and y > 0, a, b)
+10. 逻辑运算符必须使用函数形式，禁止使用中缀形式或符号：
+    - 逻辑与：and(input1, input2) — 例如 and(x > 0, y > 0)
+    - 逻辑或：or(input1, input2) — 例如 or(x > 0, y > 0)
+    - 逻辑非：not(x) — 例如 not(x > 0)
+    - ✓ 正确：if_else(and(x > 0, y > 0), a, b)
+    - ❌ 错误：if_else(x > 0 and y > 0, a, b) — 禁止中缀形式
+    - ❌ 错误：if_else(x > 0 & y > 0, a, b) — 禁止符号形式
 """
 
 

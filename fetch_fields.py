@@ -10,8 +10,15 @@ Usage:
 
 import os
 import sys
+import logging
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -27,8 +34,18 @@ def main():
 
     fetcher = DataFetcher(session=session)
 
+    # Fetch and save fields
+    print("Fetching fields...")
+    fields = fetcher.fetch_all_fields()
+    field_files = fetcher.save_fields_to_csv(fields)
+
+    print(f"\n=== Fields ===")
+    print(f"Saved {len(field_files)} field files")
+    for file in field_files:
+        print(f"  {file}")
+
     # Fetch and save operators
-    print("Fetching operators...")
+    print("\nFetching operators...")
     operators = fetcher.fetch_operators()
     csv_path = fetcher.save_operators_to_csv(operators)
 

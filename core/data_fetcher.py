@@ -244,6 +244,7 @@ class DataFetcher:
                 "Description": field.get("description", ""),
                 "Type": field.get("type", ""),
                 "Dataset": ds_name,
+                "Alphas": field.get("alphaCount", 0),  # 使用正确的字段名 alphaCount
             })
 
         saved_files = []
