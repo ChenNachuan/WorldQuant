@@ -12,7 +12,8 @@
 - **智能挽救池** — 边界因子自动进入挽救池，针对性修复失败检查，最多尝试 3 次
 - **反向因子检测** — Sharpe < -0.8 时自动加负号重测
 - **共享因子池** — 支持团队协作，防冲突的分布式因子池
-- **飞书通知** — 发现 Alpha、定期汇总、异常熔断时自动推送飞书消息
+- **飞书通知** — 发现 Alpha、定期汇总、异常熔断时自动推送飞书消息（post 类型富文本）
+- **表达式验证** — 自动验证表达式中的变量是否在可用字段范围内
 - **严格筛选** — 只保存符合条件的因子（Sharpe ≥ 1.25, Fitness ≥ 1.0, 所有 checks 通过）
 - **手动提交** — 不自动提交，通过独立脚本手动控制提交
 
@@ -158,7 +159,28 @@ WorldQuant/
 
 这确保了每次生成都使用不同的字段组合，最大化探索范围。
 
-### 3. Alpha 生成策略
+### 3. 表达式规则
+
+**事件字段限制（VECTOR 类型）**：
+
+事件字段（如 `nws_*`, `snt_*`, `scl_*_buzz*`, `rp_*` 等）是 VECTOR 类型，有严格限制：
+- ❌ 不能用 `>` `<` `>=` `<=` 比较（如 `if_else(nws12_xxx > 0, ...)` 是错误的）
+- ❌ 不能参与算术运算（`+`, `-`, `*`, `/`）
+- ✓ 只能用 `==` 或 `!=` 判断：`if_else(field == 1, x, y)`
+- ✓ 或用 `sign()` 转换后再比较：`if_else(sign(field) == 1, x, y)`
+- ✓ 或直接作为 `trade_when` 的条件（不加比较）：`trade_when(field, x, y)`
+
+**逻辑运算符**：
+
+必须使用函数形式，禁止使用中缀形式或符号：
+- 逻辑与：`and(input1, input2)` — 例如 `and(x > 0, y > 0)`
+- 逻辑或：`or(input1, input2)` — 例如 `or(x > 0, y > 0)`
+- 逻辑非：`not(x)` — 例如 `not(x > 0)`
+- ✓ 正确：`if_else(and(x > 0, y > 0), a, b)`
+- ❌ 错误：`if_else(x > 0 and y > 0, a, b)` — 禁止中缀形式
+- ❌ 错误：`if_else(x > 0 & y > 0, a, b)` — 禁止符号形式
+
+### 4. Alpha 生成策略
 
 **新开采 (60% 概率)**
 - 根据动态权重选择模块
@@ -182,7 +204,7 @@ WorldQuant/
   - Drawdown 过大 → 增加衰减平滑
 - 最多尝试 3 次，失败则删除
 
-### 4. 结果处理
+### 5. 结果处理
 
 | 条件 | 动作 |
 |------|------|
@@ -201,7 +223,7 @@ WorldQuant/
    - TURNOVER/DRAWDOWN → 进入挽救池（可通过调整参数修复）
    - SELF_CORRELATION → 丢弃（核心逻辑问题，rescue 无效）
 
-### 5. 数据库状态
+### 6. 数据库状态
 
 因子保存到数据库时的状态：
 - `unsubmitted` — 符合条件但未提交
@@ -212,7 +234,7 @@ WorldQuant/
 - 检查其他所有 checks
 - 任何 check 失败都会显示详细原因并从数据库删除
 
-### 6. 共享因子池
+### 7. 共享因子池
 
 团队协作功能：
 - 每个成员有独立的 JSON 文件：`shared_pool_{member_id}.json`
@@ -368,7 +390,8 @@ python fetch_fields.py
 ### 数据库结构
 
 **alphas 表**：存储符合条件的因子
-- 主键：(expression, region, universe, neutralization)
+- 主键：alpha_id（WorldQuant 分配的唯一 ID）
+- 索引：(expression, region, universe, neutralization) 用于去重
 - 状态值：
   - `unsubmitted` — 符合条件但未提交
   - `submitted` — 已成功提交
