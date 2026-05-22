@@ -293,6 +293,15 @@ class AlphaDB:
             cur.execute("UPDATE alphas SET status = ? WHERE alpha_id = ?", (status, alpha_id))
             return cur.rowcount
 
+    def update_alpha_checks(self, alpha_id: str, checks: list) -> int:
+        """Update alpha checks by alpha_id. Returns number of rows updated."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE alphas SET checks = ? WHERE alpha_id = ?",
+                (json.dumps(checks), alpha_id)
+            )
+            return cur.rowcount
+
     def delete_alpha_by_alpha_id(self, alpha_id: str) -> int:
         """Delete alpha by alpha_id. Returns number of rows deleted."""
         with self._cursor() as cur:
