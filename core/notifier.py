@@ -37,8 +37,15 @@ class Notifier:
             resp = requests.post(
                 self.webhook_url,
                 json={
-                    "msg_type": "text",
-                    "content": {"text": f"{title}\n{content}"},
+                    "msg_type": "post",
+                    "content": {
+                        "post": {
+                            "zh_cn": {
+                                "title": title,
+                                "content": [[{"tag": "text", "text": content}]],
+                            }
+                        }
+                    },
                 },
                 timeout=10,
             )
