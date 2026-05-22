@@ -483,6 +483,38 @@ class AlphaDB:
             "successful_alphas": len(self.get_successful_alphas()),
         }
 
+    def get_alpha_summary(self) -> Dict:
+        """Get summary statistics for notifications."""
+        with self._cursor() as cur:
+            # Total counts
+            cur.execute("SELECT COUNT(*) as total FROM alphas")
+            total = cur.fetchone()["total"]
+
+            cur.execute("SELECT COUNT(*) as count FROM alphas WHERE status = 'submitted'")
+            submitted = cur.fetchone()["count"]
+
+            cur.execute("SELECT COUNT(*) as count FROM alphas WHERE status = 'unsubmitted'")
+            unsubmitted = cur.fetchone()["count"]
+
+            # Last 24 hours
+            cur.execute("""
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN sharpe >= 1.25 AND fitness >= 1.0 THEN 1 ELSE 0 END) as submittable
+                FROM alphas
+                WHERE created_at >= datetime('now', '-1 day')
+            """)
+            row_24h = cur.fetchone()
+            new_24h = row_24h["total"]
+            submittable_24h = row_24h["submittable"] or 0
+
+            return {
+                "total": total,
+                "submitted": submitted,
+                "unsubmitted": unsubmitted,
+                "new_24h": new_24h,
+                "submittable_24h": submittable_24h,
+            }
+
 
 # ── Global singleton ─────────────────────────────────────────────────
 

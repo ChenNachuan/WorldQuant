@@ -2,12 +2,13 @@
 检查 unsubmitted alpha 的相关性状态
 
 通过 GET /alphas/{alpha_id}/check 端点查询真实的 check 状态，
-不需要提交 alpha。
+不需要提交 alpha。检查结果和汇总统计发送到飞书。
 
 Usage:
     python check_correlation.py              # 检查所有 unsubmitted alpha
     python check_correlation.py --dry-run    # 只检查，不更新数据库
     python check_correlation.py --delete-fail # 删除 SELF_CORRELATION FAIL 的
+    python check_correlation.py --no-notify  # 不发送飞书通知
 """
 
 import os
@@ -26,6 +27,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 from core.config import load_credentials
 from core.alpha_db import get_alpha_db
+from core.notifier import get_notifier
 from core.log_manager import setup_logger
 
 logger = setup_logger(__name__)
@@ -88,6 +90,7 @@ def main():
     parser = argparse.ArgumentParser(description="检查 alpha 相关性状态")
     parser.add_argument("--dry-run", action="store_true", help="只检查，不更新数据库")
     parser.add_argument("--delete-fail", action="store_true", help="删除 SELF_CORRELATION FAIL 的 alpha")
+    parser.add_argument("--no-notify", action="store_true", help="不发送飞书通知")
     args = parser.parse_args()
 
     # Authenticate
@@ -103,6 +106,7 @@ def main():
     print("Authentication successful\n")
 
     db = get_alpha_db()
+    notifier = get_notifier()
 
     # Get all unsubmitted alphas
     alphas = db.get_all_alphas(limit=10000)
@@ -123,6 +127,8 @@ def main():
         "deleted": 0,
         "error": 0,
     }
+
+    failed_alphas = []
 
     for i, alpha in enumerate(unsubmitted, 1):
         alpha_id = alpha.get("alpha_id")
@@ -152,6 +158,11 @@ def main():
         elif sc["status"] == "FAIL":
             print(f"✗ FAIL (value={sc['value']:.4f}, limit={sc['limit']})")
             stats["fail"] += 1
+            failed_alphas.append({
+                "alpha_id": alpha_id,
+                "value": sc["value"],
+                "limit": sc["limit"],
+            })
             if not args.dry_run and args.delete_fail:
                 db.delete_alpha_by_alpha_id(alpha_id)
                 stats["deleted"] += 1
@@ -168,7 +179,10 @@ def main():
         # 避免 API 限流
         time.sleep(2)
 
-    # Summary
+    # Get summary statistics
+    summary = db.get_alpha_summary()
+
+    # Print summary
     print("\n" + "=" * 50)
     print("检查完成")
     print("=" * 50)
@@ -181,6 +195,25 @@ def main():
         if args.delete_fail:
             print(f"已删除: {stats['deleted']}")
     print(f"错误: {stats['error']}")
+    print()
+    print("因子库汇总:")
+    print(f"  总数: {summary['total']}")
+    print(f"  已提交: {summary['submitted']}")
+    print(f"  未提交: {summary['unsubmitted']}")
+    print(f"  过去24h新增: {summary['new_24h']}")
+    print(f"  过去24h可提交: {summary['submittable_24h']}")
+
+    # Send Feishu notification
+    if not args.no_notify and notifier.enabled:
+        print("\n发送飞书通知...")
+        notifier.notify_correlation_check(
+            total=stats["total"],
+            passed=stats["pass"],
+            failed=stats["fail"],
+            failed_alphas=failed_alphas,
+            summary=summary,
+        )
+        print("飞书通知已发送")
 
 
 if __name__ == "__main__":
