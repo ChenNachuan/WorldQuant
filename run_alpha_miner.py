@@ -346,10 +346,31 @@ class AlphaMiner:
     # Dynamic Module Weights
     # ==========================================
 
+    @staticmethod
+    def log_minmax_softmax(values: list, temperature: float = 0.12) -> list:
+        """Log + MinMax + Softmax 权重转换。
+
+        1. Log(1+x) 压缩极端值
+        2. MinMax 归一化到 [0, 1]
+        3. Softmax with temperature
+        """
+        import math
+        log_values = [math.log1p(v) for v in values]
+        min_val = min(log_values)
+        max_val = max(log_values)
+        if max_val - min_val == 0:
+            return [1.0 / len(values)] * len(values)
+        normalized = [(x - min_val) / (max_val - min_val) for x in log_values]
+        scaled = [x / temperature for x in normalized]
+        max_scaled = max(scaled)
+        exp_values = [math.exp(x - max_scaled) for x in scaled]
+        sum_exp = sum(exp_values)
+        return [v / sum_exp for v in exp_values]
+
     def get_dynamic_modules(self, fields_pool: Dict, sample_size: int = 15) -> tuple:
         """
-        Select 1-2 modules based on alpha counts,
-        then sample fields based on alpha counts.
+        Select 1-2 modules using Log+MinMax+Softmax weighting,
+        then sample fields using the same method.
         Returns (selected_fields, modules_used)
         """
         # 计算每个数据集的总 alpha 数量
@@ -358,30 +379,32 @@ class AlphaMiner:
             total_alphas = sum(f.get('Alphas', 0) for f in fields)
             module_alpha_counts[mod] = total_alphas
 
-        # 根据 alpha 数量加权选择数据集
+        # 使用 Log+MinMax+Softmax 计算数据集权重
         modules = list(fields_pool.keys())
-        weights = [module_alpha_counts.get(mod, 0) for mod in modules]
+        raw_counts = [module_alpha_counts.get(mod, 0) for mod in modules]
 
-        # 如果所有权重为0，使用均匀分布
-        if sum(weights) == 0:
+        if sum(raw_counts) == 0:
             weights = [1.0] * len(modules)
+        else:
+            weights = self.log_minmax_softmax(raw_counts, temperature=0.12)
 
         # Select 1 or 2 modules
         num_to_select = random.choice([1, 2])
         selected = random.choices(modules, weights=weights, k=num_to_select)
         selected = list(set(selected))
 
-        # 在选定的数据集中，根据 alpha 数量加权选择字段
+        # 在选定的数据集中，使用 Log+MinMax+Softmax 选择字段
         selected_fields = {}
         for mod in selected:
             pool = fields_pool.get(mod, [])
             if not pool:
                 continue
 
-            # 根据 alpha 数量加权选择字段
-            field_weights = [f.get('Alphas', 0) for f in pool]
-            if sum(field_weights) == 0:
+            raw_weights = [f.get('Alphas', 0) for f in pool]
+            if sum(raw_weights) == 0:
                 field_weights = [1.0] * len(pool)
+            else:
+                field_weights = self.log_minmax_softmax(raw_weights, temperature=0.12)
 
             n = min(sample_size, len(pool))
             selected_fields[mod] = random.choices(pool, weights=field_weights, k=n)
