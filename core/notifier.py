@@ -63,24 +63,27 @@ class Notifier:
         return False
 
     def send_markdown(self, title: str, markdown: str) -> bool:
-        """发送飞书 Markdown 消息。返回是否成功。"""
+        """发送飞书 Markdown 卡片消息。返回是否成功。"""
         if not self.webhook_url:
             return False
 
-        # 飞书 Markdown 消息格式
+        # 飞书卡片 V2 格式
         payload = {
             "msg_type": "interactive",
             "card": {
+                "schema": "2.0",
                 "header": {
                     "title": {"tag": "plain_text", "content": title},
                     "template": "blue"
                 },
-                "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": markdown
-                    }
-                ]
+                "body": {
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": markdown
+                        }
+                    ]
+                }
             }
         }
 
@@ -138,39 +141,41 @@ class Notifier:
         failed_alphas: list,
         summary: dict = None,
     ):
-        """相关性检查结果通知。"""
+        """相关性检查结果通知（Markdown 卡片格式）。"""
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         lines = [
-            f"检查时间: {timestamp}",
+            f"**检查时间:** {timestamp}",
             "",
-            "=== 相关性检查结果 ===",
-            f"检查总数: {total}",
-            f"PASS: {passed}",
-            f"FAIL: {failed}",
+            "## 相关性检查结果",
+            f"- 检查总数: **{total}**",
+            f"- PASS: **{passed}** ✅",
+            f"- FAIL: **{failed}** ❌",
         ]
 
         if failed_alphas:
             lines.append("")
-            lines.append("=== 失败详情 ===")
+            lines.append("## 失败详情")
+            lines.append("| Alpha ID | 相关性值 | 限制值 |")
+            lines.append("|----------|----------|--------|")
             for alpha in failed_alphas[:10]:
-                lines.append(f"  {alpha['alpha_id']}: {alpha['value']:.4f} (limit={alpha['limit']})")
+                lines.append(f"| {alpha['alpha_id']} | {alpha['value']:.4f} | {alpha['limit']} |")
             if len(failed_alphas) > 10:
-                lines.append(f"  ... 共 {len(failed_alphas)} 个")
+                lines.append(f"| ... | 共 {len(failed_alphas)} 个 | |")
 
         if summary:
             lines.append("")
-            lines.append("=== 因子库汇总 ===")
-            lines.append(f"因子总数: {summary.get('total', 0)}")
-            lines.append(f"已提交: {summary.get('submitted', 0)}")
-            lines.append(f"未提交: {summary.get('unsubmitted', 0)}")
+            lines.append("## 因子库汇总")
+            lines.append(f"- 因子总数: **{summary.get('total', 0)}**")
+            lines.append(f"- 已提交: **{summary.get('submitted', 0)}**")
+            lines.append(f"- 未提交: **{summary.get('unsubmitted', 0)}**")
             lines.append("")
-            lines.append("=== 过去 24 小时 ===")
-            lines.append(f"新增因子: {summary.get('new_24h', 0)}")
-            lines.append(f"可提交: {summary.get('submittable_24h', 0)}")
+            lines.append("## 过去 24 小时")
+            lines.append(f"- 新增因子: **{summary.get('new_24h', 0)}**")
+            lines.append(f"- 可提交: **{summary.get('submittable_24h', 0)}**")
 
-        self.send("相关性检查报告", "\n".join(lines))
+        self.send_markdown("相关性检查报告", "\n".join(lines))
 
     # ── 定期汇总通知 ────────────────────────────────────────────────
 
