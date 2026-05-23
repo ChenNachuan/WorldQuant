@@ -200,17 +200,30 @@ class Notifier:
         rescue_pool: int,
         member_id: str = "",
     ):
-        """定期汇总通知。"""
+        """定期汇总通知（Markdown 卡片格式）。"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         lines = [
-            "已测试: {} | 通过: {} | 失败: {}".format(tested, passed, failed),
-            "最佳 Sharpe: {:.2f} | 最佳 Fitness: {:.2f}".format(
-                best_sharpe, best_fitness
-            ),
-            "Rescue Pool: {}".format(rescue_pool),
+            f"**汇总时间:** {timestamp}",
+            "",
+            "## 测试结果",
+            "| 项目 | 数量 |",
+            "|------|------|",
+            f"| 已测试 | **{tested}** |",
+            f"| 通过 | **{passed}** ✅ |",
+            f"| 失败 | **{failed}** ❌ |",
+            "",
+            "## 最佳指标",
+            f"- Sharpe: **{best_sharpe:.2f}**",
+            f"- Fitness: **{best_fitness:.2f}**",
+            "",
+            f"**Rescue Pool:** {rescue_pool}",
         ]
         if member_id:
-            lines.append("Member: {}".format(member_id))
-        self.send("挖矿进度汇总", "\n".join(lines))
+            lines.append(f"**Member:** {member_id}")
+
+        self.send_markdown("挖矿进度汇总", "\n".join(lines), template="orange")
 
     # ── 异常熔断报警 ────────────────────────────────────────────────
 
