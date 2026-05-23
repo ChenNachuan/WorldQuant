@@ -62,7 +62,7 @@ class Notifier:
             logger.warning(f"飞书通知异常: {e}")
         return False
 
-    def send_markdown(self, title: str, markdown: str) -> bool:
+    def send_markdown(self, title: str, markdown: str, template: str = "blue") -> bool:
         """发送飞书 Markdown 卡片消息。返回是否成功。"""
         if not self.webhook_url:
             return False
@@ -74,7 +74,7 @@ class Notifier:
                 "schema": "2.0",
                 "header": {
                     "title": {"tag": "plain_text", "content": title},
-                    "template": "blue"
+                    "template": template
                 },
                 "body": {
                     "elements": [
@@ -117,19 +117,30 @@ class Notifier:
         expression: str,
         member_id: str = "",
     ):
-        """发现符合条件的 Alpha 时发送通知。"""
+        """发现符合条件的 Alpha 时发送通知（Markdown 卡片格式）。"""
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         expr_short = expression[:80] + ("..." if len(expression) > 80 else "")
+
         lines = [
-            f"时间: {timestamp}",
-            f"Alpha ID: {alpha_id}",
-            f"Expression: {expr_short}",
-            f"Sharpe: {sharpe:.2f} | Fitness: {fitness:.2f} | Turnover: {turnover:.2f}",
+            f"**发现时间:** {timestamp}",
+            "",
+            "## Alpha 信息",
+            f"- **ID:** {alpha_id}",
+            f"- **Member:** {member_id or 'N/A'}",
+            "",
+            "## 指标",
+            "| 指标 | 值 |",
+            "|------|------|",
+            f"| Sharpe | **{sharpe:.2f}** |",
+            f"| Fitness | **{fitness:.2f}** |",
+            f"| Turnover | **{turnover:.2f}** |",
+            "",
+            "## Expression",
+            f"```\n{expr_short}\n```",
         ]
-        if member_id:
-            lines.append(f"Member: {member_id}")
-        self.send("发现新 Alpha!", "\n".join(lines))
+
+        self.send_markdown("发现新 Alpha!", "\n".join(lines), template="green")
 
     # ── 相关性检查通知 ──────────────────────────────────────────────
 
