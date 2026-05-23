@@ -6,7 +6,7 @@
 
 - **双 LLM 支持** — 同时支持 DeepSeek API 和本地 Ollama 模型
 - **动态赛道权重** — 强化学习风格的模块选择，按成功率动态调整
-- **随机字段采样** — 每次从 7,642 个字段中随机抽取 15 个，最大化探索范围
+- **智能字段采样** — 使用 Log+MinMax+Softmax 算法平衡字段选择，避免量价数据过度主导（基尼系数从 0.93 降到 0.74）
 - **非线性基因重组** — 20% 概率从共享池提取精英因子，使用 ts_corr、ts_cov、rank 等非线性算子杂交，避免相关性检测失败
 - **参数调优** — 检查失败时自动尝试 4 组代表性参数组合（中性化、截断、衰减）
 - **智能挽救池** — 边界因子自动进入挽救池，针对性修复失败检查，最多尝试 3 次
@@ -131,7 +131,10 @@ WorldQuant/
 ├── run_alpha_miner.py             # 主挖掘程序
 ├── submit_alpha.py                # 因子提交脚本
 ├── add_alpha.py                   # 手动添加因子脚本
+├── check_correlation.py           # 相关性检查脚本
+├── setup_cron.sh                  # 定时任务配置脚本
 ├── fetch_fields.py                # 字段和运算符获取脚本
+├── mine.sh                        # 一键启动脚本
 ├── .env.example                   # 环境变量示例
 └── README.md                      # 本文件
 ```
@@ -143,21 +146,31 @@ WorldQuant/
 系统启动时从 `data/fields/` 目录加载全部 16 个数据集的字段（共 7,642 个），存储在内存中作为字段池。
 
 数据集包括：
-- `analyst4.csv` — 分析师预估数据（1,325 字段）
-- `fundamental6.csv` — 公司基本面数据（887 字段）
-- `model77.csv` — 因子模型（3,257 字段）
-- `pv13.csv` — 价格与成交量（166 字段）
-- `news12.csv` — 新闻数据（876 字段）
+- `pv1.csv` — 价格与成交量（24 字段，Alpha 总数 3,187,456）
+- `fundamental6.csv` — 公司基本面数据（886 字段，Alpha 总数 1,360,154）
+- `analyst4.csv` — 分析师预估数据（1,324 字段，Alpha 总数 727,949）
+- `model77.csv` — 因子模型（3,256 字段，Alpha 总数 171,891）
+- `news12.csv` — 新闻数据（875 字段，Alpha 总数 157,516）
 - 等共 16 个数据集
 
-### 2. 动态模块选择与随机采样
+### 2. 动态模块选择与智能字段采样
 
-系统维护 16 个模块的统计数据，每次生成时：
-1. 根据成功率计算权重，随机选择 1-2 个模块
-2. 从选中模块的字段池中**随机抽取 15 个字段**（每次不同）
-3. 成功率高的模块被选中概率更大
+系统使用 **Log+MinMax+Softmax** 算法平衡字段选择：
 
-这确保了每次生成都使用不同的字段组合，最大化探索范围。
+**算法流程**：
+1. `Log(1+x)` — 压缩极端值，避免 Alpha 数量差异过大
+2. `MinMax 归一化` — 将值映射到 [0, 1] 区间
+3. `Softmax(T=0.12)` — 按温度参数生成概率分布
+
+**效果**：
+- 量价数据（pv1）权重从 49.7% 降到 40.7%，不再过度主导
+- 低频数据集（news12、model77 等）获得 1.4-2.6 倍权重提升
+- 字段级别：close 权重从 8.85% 降到 2.25%，Bottom50 字段提升 35 倍
+
+**选择流程**：
+1. 使用 Log+MinMax+Softmax 计算数据集权重，随机选择 1-2 个数据集
+2. 在选中的数据集内，使用相同算法计算字段权重，抽取 15 个字段
+3. 每次生成使用不同的字段组合，最大化探索范围
 
 ### 3. 表达式规则
 
@@ -268,6 +281,15 @@ python add_alpha.py <alpha_id> [alpha_id2 ...]
 
 从 WorldQuant Brain 获取因子信息并添加到数据库（状态为 "submitted"）。
 
+### check_correlation.py
+
+```bash
+python check_correlation.py              # 检查所有 unsubmitted 因子
+python check_correlation.py --dry-run    # 只检查，不更新数据库
+python check_correlation.py --delete-fail # 删除 SELF_CORRELATION FAIL 的
+python check_correlation.py --no-notify  # 不发送飞书通知
+```
+
 ### fetch_fields.py
 
 从 WQ Brain API 获取数据字段和运算符：
@@ -305,6 +327,41 @@ DeepSeek API 是推荐的选择，因为：
 配置方法：
 1. 飞书群 → 设置 → 机器人 → 添加自定义机器人
 2. 复制 Webhook URL 到 `.env` 的 `FEISHU_WEBHOOK`
+
+## 相关性检查
+
+使用 `check_correlation.py` 检查未提交因子的 SELF_CORRELATION 状态：
+
+```bash
+# 检查所有 unsubmitted 因子
+python check_correlation.py
+
+# 只检查，不更新数据库
+python check_correlation.py --dry-run
+
+# 删除 SELF_CORRELATION FAIL 的因子
+python check_correlation.py --delete-fail
+
+# 不发送飞书通知
+python check_correlation.py --no-notify
+```
+
+### 定时自动检查
+
+使用 `setup_cron.sh` 配置每天自动检查（北京时间 9:00）：
+
+```bash
+# 添加定时任务
+./setup_cron.sh
+
+# 查看定时任务状态
+./setup_cron.sh status
+
+# 移除定时任务
+./setup_cron.sh remove
+```
+
+定时任务会自动删除 SELF_CORRELATION FAIL 的因子，并发送飞书通知。
 
 ## 使用 Ollama 本地模型
 
