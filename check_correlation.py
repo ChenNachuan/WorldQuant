@@ -1,11 +1,13 @@
 """
-检查 unsubmitted alpha 的相关性状态
+检查 pending alpha 的相关性状态
 
 通过 GET /alphas/{alpha_id}/check 端点查询真实的 check 状态，
 不需要提交 alpha。检查结果和汇总统计发送到飞书。
 
+新入库的因子 status 为 "pending"，通过相关性检测后变为 "unsubmitted"。
+
 Usage:
-    python check_correlation.py              # 检查所有 unsubmitted alpha
+    python check_correlation.py              # 检查所有 pending alpha
     python check_correlation.py --dry-run    # 只检查，不更新数据库
     python check_correlation.py --delete-fail # 删除 SELF_CORRELATION FAIL 的
     python check_correlation.py --no-notify  # 不发送飞书通知
@@ -108,15 +110,15 @@ def main():
     db = get_alpha_db()
     notifier = get_notifier()
 
-    # Get all unsubmitted alphas
+    # Get all pending alphas (waiting for correlation check)
     alphas = db.get_all_alphas(limit=10000)
-    unsubmitted = [a for a in alphas if a.get("status") == "unsubmitted"]
+    unsubmitted = [a for a in alphas if a.get("status") == "pending"]
 
     if not unsubmitted:
-        print("没有 unsubmitted 的 alpha")
+        print("没有 pending 的 alpha")
         return
 
-    print(f"找到 {len(unsubmitted)} 个 unsubmitted alpha\n")
+    print(f"找到 {len(unsubmitted)} 个 pending alpha\n")
 
     stats = {
         "total": len(unsubmitted),
@@ -153,6 +155,7 @@ def main():
             stats["pass"] += 1
             if not args.dry_run:
                 db.update_alpha_checks(alpha_id, checks)
+                db.update_alpha_status(alpha_id, "unsubmitted")
                 stats["updated"] += 1
 
         elif sc["status"] == "FAIL":

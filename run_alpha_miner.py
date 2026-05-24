@@ -871,7 +871,7 @@ VECTOR 字段使用限制：
                     else:
                         logger.info(f"Discarding alpha {alpha_id} (non-rescuable checks: {failed_checks})")
             else:
-                logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f} (unsubmitted)")
+                logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f} (pending)")
 
                 # 飞书通知
                 self.notifier.notify_alpha(
@@ -883,7 +883,7 @@ VECTOR 字段使用限制：
                     member_id=self.member_id,
                 )
 
-                # Save to database as unsubmitted
+                # Save to database as pending (will become unsubmitted after correlation check)
                 self.alpha_db.add_alpha(
                     expression=expression,
                     alpha_id=alpha_id,
@@ -904,7 +904,7 @@ VECTOR 字段使用限制：
                     decay=result.get("decay", 0),
                     neutralization=result.get("neutralization", "NONE"),
                     truncation=result.get("truncation", 0.08),
-                    status="unsubmitted",
+                    status="pending",
                 )
 
         # Reverse factor detection (Sharpe < -0.8)
@@ -1028,7 +1028,7 @@ VECTOR 字段使用限制：
                         decay=settings.get("decay", 0),
                         neutralization=settings.get("neutralization", "NONE"),
                         truncation=settings.get("truncation", 0.08),
-                        status="unsubmitted",
+                        status="pending",
                     )
                     return True
 

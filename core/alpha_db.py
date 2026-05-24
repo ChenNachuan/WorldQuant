@@ -496,6 +496,9 @@ class AlphaDB:
             cur.execute("SELECT COUNT(*) as count FROM alphas WHERE status = 'unsubmitted'")
             unsubmitted = cur.fetchone()["count"]
 
+            cur.execute("SELECT COUNT(*) as count FROM alphas WHERE status = 'pending'")
+            pending = cur.fetchone()["count"]
+
             # Last 24 hours
             cur.execute("""
                 SELECT COUNT(*) as total,
@@ -511,6 +514,7 @@ class AlphaDB:
                 "total": total,
                 "submitted": submitted,
                 "unsubmitted": unsubmitted,
+                "pending": pending,
                 "new_24h": new_24h,
                 "submittable_24h": submittable_24h,
             }
