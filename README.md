@@ -12,7 +12,7 @@
 - **智能挽救池** — 边界因子自动进入挽救池，针对性修复失败检查，最多尝试 3 次
 - **反向因子检测** — Sharpe < -0.8 时自动加负号重测
 - **共享因子池** — 支持团队协作，防冲突的分布式因子池
-- **飞书通知** — 发现 Alpha、定期汇总、异常熔断时自动推送飞书消息（post 类型富文本）
+- **飞书通知** — 发现 Alpha、定期汇总、相关性检查、异常熔断时自动推送飞书消息（Markdown 卡片格式）
 - **表达式验证** — 自动验证表达式中的变量是否在可用字段范围内
 - **严格筛选** — 只保存符合条件的因子（Sharpe ≥ 1.25, Fitness ≥ 1.0, 所有 checks 通过）
 - **手动提交** — 不自动提交，通过独立脚本手动控制提交
@@ -83,7 +83,7 @@ python run_alpha_miner.py --workers 3
 
 ### 5. 提交因子
 
-挖掘出的因子会自动保存到数据库（状态为 "unsubmitted"），使用以下命令提交：
+挖掘出的因子会自动保存到数据库（状态为 "pending"），通过相关性检查后变为 "unsubmitted"，使用以下命令提交：
 
 ```bash
 # 提交单个因子
@@ -221,7 +221,7 @@ WorldQuant/
 
 | 条件 | 动作 |
 |------|------|
-| Sharpe ≥ 1.25 且 Fitness ≥ 1.0 且所有 checks 通过 | 保存到数据库（unsubmitted） |
+| Sharpe ≥ 1.25 且 Fitness ≥ 1.0 且所有 checks 通过 | 保存到数据库（pending） |
 | Sharpe ≥ 1.25 且 Fitness ≥ 1.0 但 checks 失败 | 参数调优 → 根据检查类型决定是否 rescue |
 | Sharpe > 1.0 且 Fitness > 0.8 | 加入共享池 |
 | Sharpe < -0.8 | 加负号重测（反向因子） |
@@ -239,7 +239,8 @@ WorldQuant/
 ### 6. 数据库状态
 
 因子保存到数据库时的状态：
-- `unsubmitted` — 符合条件但未提交
+- `pending` — 新入库，等待相关性检查
+- `unsubmitted` — 通过相关性检查，可提交
 - `submitted` — 已成功提交到平台
 
 提交时会进行最终验证：
@@ -271,7 +272,7 @@ WorldQuant/
 python submit_alpha.py <alpha_id> [alpha_id2 ...]
 ```
 
-提交因子到 WorldQuant Brain，失败会显示详细原因并从数据库删除。
+提交因子到 WorldQuant Brain（仅限 unsubmitted 状态），失败会显示详细原因并从数据库删除。
 
 ### add_alpha.py
 
@@ -330,17 +331,17 @@ DeepSeek API 是推荐的选择，因为：
 
 ## 相关性检查
 
-使用 `check_correlation.py` 检查未提交因子的 SELF_CORRELATION 状态：
+使用 `check_correlation.py` 检查 pending 因子的 SELF_CORRELATION 状态：
 
 ```bash
-# 检查所有 unsubmitted 因子
+# 检查所有 pending 因子（默认删除失败的）
 python check_correlation.py
 
 # 只检查，不更新数据库
 python check_correlation.py --dry-run
 
-# 删除 SELF_CORRELATION FAIL 的因子
-python check_correlation.py --delete-fail
+# 保留失败的因子不删除
+python check_correlation.py --keep-fail
 
 # 不发送飞书通知
 python check_correlation.py --no-notify
@@ -450,7 +451,8 @@ python fetch_fields.py
 - 主键：alpha_id（WorldQuant 分配的唯一 ID）
 - 索引：(expression, region, universe, neutralization) 用于去重
 - 状态值：
-  - `unsubmitted` — 符合条件但未提交
+  - `pending` — 新入库，等待相关性检查
+  - `unsubmitted` — 通过相关性检查，可提交
   - `submitted` — 已成功提交
 
 **rescue_pool 表**：存储需要挽救的边界因子
