@@ -5,11 +5,12 @@
 不需要提交 alpha。检查结果和汇总统计发送到飞书。
 
 新入库的因子 status 为 "pending"，通过相关性检测后变为 "unsubmitted"。
+默认删除未通过相关性检查的因子。
 
 Usage:
-    python check_correlation.py              # 检查所有 pending alpha
+    python check_correlation.py              # 检查所有 pending alpha（失败自动删除）
     python check_correlation.py --dry-run    # 只检查，不更新数据库
-    python check_correlation.py --delete-fail # 删除 SELF_CORRELATION FAIL 的
+    python check_correlation.py --keep-fail  # 保留失败的 alpha 不删除
     python check_correlation.py --no-notify  # 不发送飞书通知
 """
 
@@ -91,7 +92,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="检查 alpha 相关性状态")
     parser.add_argument("--dry-run", action="store_true", help="只检查，不更新数据库")
-    parser.add_argument("--delete-fail", action="store_true", help="删除 SELF_CORRELATION FAIL 的 alpha")
+    parser.add_argument("--keep-fail", action="store_true", help="保留 SELF_CORRELATION FAIL 的 alpha（默认删除）")
     parser.add_argument("--no-notify", action="store_true", help="不发送飞书通知")
     args = parser.parse_args()
 
@@ -166,7 +167,7 @@ def main():
                 "value": sc["value"],
                 "limit": sc["limit"],
             })
-            if not args.dry_run and args.delete_fail:
+            if not args.dry_run and not args.keep_fail:
                 db.delete_alpha_by_alpha_id(alpha_id)
                 stats["deleted"] += 1
                 print(f"  -> 已删除")
@@ -195,7 +196,7 @@ def main():
     print(f"PENDING: {stats['pending']}")
     if not args.dry_run:
         print(f"已更新: {stats['updated']}")
-        if args.delete_fail:
+        if not args.keep_fail:
             print(f"已删除: {stats['deleted']}")
     print(f"错误: {stats['error']}")
     print()
