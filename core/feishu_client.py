@@ -75,6 +75,12 @@ class FeishuClient:
             import json
             text = json.loads(content).get("text", "").strip()
 
+            # 去掉飞书自动添加的 @ 提及前缀
+            # 格式: @_user_1 /summary 或 @_user_1 空格 /summary
+            if text.startswith("@_user_"):
+                parts = text.split(maxsplit=1)
+                text = parts[1] if len(parts) > 1 else ""
+
             return message_id, chat_id, text
 
         except Exception as e:
