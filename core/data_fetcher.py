@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Base directories
 BASE_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-FIELDS_DIR = os.path.join(BASE_DATA_DIR, "fields")
+FIELDS_DIR = os.path.join(BASE_DATA_DIR, "fields_delay1")  # Default to delay1
 OPERATORS_DIR = os.path.join(BASE_DATA_DIR, "operators")
 
 # Region -> Universe mapping
@@ -228,8 +228,12 @@ class DataFetcher:
 
     # ── Save fields to CSV ───────────────────────────────────────────
 
-    def save_fields_to_csv(self, fields: List[Dict]) -> List[str]:
+    def save_fields_to_csv(self, fields: List[Dict], delay: int = 1) -> List[str]:
         """Save fields to CSV files grouped by dataset."""
+        # 根据 delay 参数选择目录
+        fields_dir = os.path.join(BASE_DATA_DIR, f"fields_delay{delay}")
+        os.makedirs(fields_dir, exist_ok=True)
+
         datasets: Dict[str, List[Dict]] = {}
 
         for field in fields:
@@ -254,7 +258,7 @@ class DataFetcher:
                 continue
 
             safe_name = re.sub(r"[^a-z0-9_]+", "_", ds_id.lower()).strip("_")
-            csv_path = os.path.join(FIELDS_DIR, f"{safe_name}.csv")
+            csv_path = os.path.join(fields_dir, f"{safe_name}.csv")
 
             df = pd.DataFrame(ds_fields)
             df.to_csv(csv_path, index=False, encoding="utf-8-sig")

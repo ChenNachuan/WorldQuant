@@ -85,7 +85,8 @@ NON_RESCUABLE_CHECKS = ["SELF_CORRELATION", "LOW_SUBMISSION_CORRELATION"]
 
 # Data directories
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-FIELDS_DIR = os.path.join(DATA_DIR, "fields")
+FIELDS_DIR_DELAY1 = os.path.join(DATA_DIR, "fields_delay1")
+FIELDS_DIR_DELAY0 = os.path.join(DATA_DIR, "fields_delay0")
 OPERATORS_DIR = os.path.join(DATA_DIR, "operators")
 SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
 
@@ -122,12 +123,17 @@ TARGET_FIELD_FILES = [
 class AlphaMiner:
     """Main alpha mining engine with direct API approach."""
 
-    def __init__(self, llm_provider: str = "auto", member_id: str = "default"):
+    def __init__(self, llm_provider: str = "auto", member_id: str = "default",
+                 username: str = None, password: str = None,
+                 delay0_prob: float = 0.3):
         self.llm_client = get_llm_client(llm_provider)
         self.alpha_db = get_alpha_db()
         self.quota = get_submission_quota()
         self.member_id = member_id
         self.notifier = get_notifier()
+        self._username = username
+        self._password = password
+        self.delay0_prob = delay0_prob
 
         # Session state
         self.session = None
@@ -173,7 +179,8 @@ class AlphaMiner:
 
         # Create directories
         os.makedirs(DATA_DIR, exist_ok=True)
-        os.makedirs(FIELDS_DIR, exist_ok=True)
+        os.makedirs(FIELDS_DIR_DELAY1, exist_ok=True)
+        os.makedirs(FIELDS_DIR_DELAY0, exist_ok=True)
         os.makedirs(SHARED_POOL_DIR, exist_ok=True)
 
     def _load_operator_knowledge(self) -> Dict[str, int]:
@@ -275,22 +282,25 @@ class AlphaMiner:
     # Field Loading (from CSV files)
     # ==========================================
 
-    def load_fields_from_csvs(self) -> Dict[str, List[Dict]]:
+    def load_fields_from_csvs(self, fields_dir: str = None) -> Dict[str, List[Dict]]:
         """Load ALL field data from specified CSV files (full pool for sampling)."""
         import pandas as pd
 
+        # 默认使用 delay1 目录
+        if fields_dir is None:
+            fields_dir = FIELDS_DIR_DELAY1
+
         all_fields = {}
 
-        if not os.path.exists(FIELDS_DIR):
-            logger.info("Fields directory not found, using default fields")
+        if not os.path.exists(fields_dir):
+            logger.info(f"Fields directory not found: {fields_dir}")
             return self._get_default_fields()
 
-        for file in TARGET_FIELD_FILES:
-            filepath = os.path.join(FIELDS_DIR, file)
-            if not os.path.exists(filepath):
-                logger.warning(f"Target file not found: {file}")
-                continue
+        # 获取目录中所有 CSV 文件
+        csv_files = [f for f in os.listdir(fields_dir) if f.endswith('.csv')]
 
+        for file in csv_files:
+            filepath = os.path.join(fields_dir, file)
             try:
                 df = pd.read_csv(filepath)
                 if 'Field' in df.columns and 'Description' in df.columns:
@@ -471,8 +481,15 @@ class AlphaMiner:
 
     def generate_alphas(self, fields_data: Dict = None) -> List[Dict]:
         """Generate alpha expressions using LLM with dynamic module selection."""
-        if not fields_data:
-            fields_data = self.load_fields_from_csvs()
+        # 根据概率选择 delay0 或 delay1 字段
+        if random.random() < self.delay0_prob:
+            fields_data = self.fields_delay0
+            delay = 0
+            logger.info("Selected delay=0 fields")
+        else:
+            fields_data = self.fields_delay1
+            delay = 1
+            logger.info("Selected delay=1 fields")
 
         # Use dynamic module selection
         target_fields, modules_used = self.get_dynamic_modules(fields_data)
@@ -544,6 +561,7 @@ VECTOR 字段使用限制：
 
             res['expression'] = clean_expression(expression)
             res['modules_used'] = modules_used
+            res['delay'] = delay  # 添加 delay 值
             valid_results.append(res)
 
         return valid_results
@@ -614,7 +632,7 @@ VECTOR 字段使用限制：
             "instrumentType": "EQUITY",
             "region": "USA",
             "universe": "TOP3000",
-            "delay": 1,
+            "delay": factor.get("delay", 1),  # 使用因子中的 delay 值
             "decay": 0,
             "neutralization": "INDUSTRY",
             "truncation": 0.08,
@@ -1196,9 +1214,15 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
             logger.error("Failed to authenticate, exiting")
             return
 
-        # Load fields data
-        fields_data = self.load_fields_from_csvs()
-        logger.info(f"Loaded fields: {list(fields_data.keys())}")
+        # Load both delay0 and delay1 fields
+        self.fields_delay1 = self.load_fields_from_csvs(FIELDS_DIR_DELAY1)
+        self.fields_delay0 = self.load_fields_from_csvs(FIELDS_DIR_DELAY0)
+        logger.info(f"Loaded delay1 fields: {list(self.fields_delay1.keys())}")
+        logger.info(f"Loaded delay0 fields: {list(self.fields_delay0.keys())}")
+        logger.info(f"Delay0 probability: {self.delay0_prob}")
+
+        # 默认使用 delay1 字段
+        fields_data = self.fields_delay1
 
         logger.info("Starting alpha miner...")
 
@@ -1310,9 +1334,33 @@ def main():
         default="default",
         help="Member ID for shared pool (prevents file conflicts in team)"
     )
+    parser.add_argument(
+        "--username",
+        type=str,
+        default=None,
+        help="WQ username (overrides .env)"
+    )
+    parser.add_argument(
+        "--password",
+        type=str,
+        default=None,
+        help="WQ password (overrides .env)"
+    )
+    parser.add_argument(
+        "--delay0-prob",
+        type=float,
+        default=0.3,
+        help="Probability of mining delay=0 factors (default: 0.3)"
+    )
     args = parser.parse_args()
 
-    miner = AlphaMiner(llm_provider=args.llm, member_id=args.member_id)
+    miner = AlphaMiner(
+        llm_provider=args.llm,
+        member_id=args.member_id,
+        username=args.username,
+        password=args.password,
+        delay0_prob=args.delay0_prob,
+    )
     miner.run(max_workers=args.workers)
 
 
