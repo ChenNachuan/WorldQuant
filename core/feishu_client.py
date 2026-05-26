@@ -60,6 +60,8 @@ class FeishuClient:
             event = body.get("event", {})
             message = event.get("message", {})
 
+            logger.debug(f"收到事件: {body}")
+
             message_id = message.get("message_id")
             chat_id = message.get("chat_id")
             msg_type = message.get("message_type")

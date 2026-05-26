@@ -308,14 +308,20 @@ def webhook():
 
     # 处理 challenge 验证
     if "challenge" in body:
+        logger.info("收到 challenge 验证请求")
         client = get_feishu_client()
         return jsonify(client.verify_challenge(body))
+
+    # 记录收到的事件类型
+    event_type = body.get("type") or body.get("header", {}).get("event_type", "unknown")
+    logger.info(f"收到飞书事件: type={event_type}")
 
     # 解析消息
     client = get_feishu_client()
     message_id, chat_id, text = client.parse_message(body)
 
     if not message_id or not text:
+        logger.debug(f"消息解析结果为空 (message_id={message_id}, text={text})")
         return jsonify({"code": 0})
 
     logger.info(f"收到消息: {text}")
