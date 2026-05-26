@@ -23,6 +23,7 @@ import subprocess
 import argparse
 import logging
 from datetime import datetime
+from collections import OrderedDict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -42,6 +43,37 @@ app = Flask(__name__)
 # PID 文件路径
 PID_FILE = ".miner.pid"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 消息去重缓存：记录已处理的 message_id，防止飞书重试导致重复执行
+# 使用 OrderedDict 实现 LRU，限制缓存大小避免内存泄漏
+_processed_messages = OrderedDict()
+_processed_messages_max_size = 1000
+_processed_messages_ttl_seconds = 300  # 5 分钟过期
+
+
+def _is_message_processed(message_id: str) -> bool:
+    """检查消息是否已处理过，并清理过期条目。"""
+    now = datetime.now().timestamp()
+
+    # 清理过期条目
+    expired_keys = [
+        k for k, v in _processed_messages.items()
+        if now - v > _processed_messages_ttl_seconds
+    ]
+    for k in expired_keys:
+        del _processed_messages[k]
+
+    # 检查是否已处理
+    return message_id in _processed_messages
+
+
+def _mark_message_processed(message_id: str):
+    """标记消息为已处理。"""
+    _processed_messages[message_id] = datetime.now().timestamp()
+
+    # 限制缓存大小，移除最旧的条目
+    while len(_processed_messages) > _processed_messages_max_size:
+        _processed_messages.popitem(last=False)
 
 
 # ── 进程管理 ─────────────────────────────────────────────────────────
@@ -365,8 +397,15 @@ def webhook():
         return jsonify(client.verify_challenge(body))
 
     # 记录收到的事件类型
-    event_type = body.get("type") or body.get("header", {}).get("event_type", "unknown")
-    logger.info(f"收到飞书事件: type={event_type}")
+    header = body.get("header", {})
+    event_type = header.get("event_type", body.get("type", "unknown"))
+    event_id = header.get("event_id", "")
+    logger.info(f"收到飞书事件: type={event_type}, event_id={event_id}")
+
+    # 消息去重：防止飞书重试导致重复执行
+    if event_id and _is_message_processed(event_id):
+        logger.warning(f"事件已处理过，跳过重复执行: event_id={event_id}")
+        return jsonify({"code": 0})
 
     # 解析消息
     client = get_feishu_client()
@@ -375,6 +414,10 @@ def webhook():
     if not message_id or not text:
         logger.debug(f"消息解析结果为空 (message_id={message_id}, text={text})")
         return jsonify({"code": 0})
+
+    # 标记事件为已处理（在执行命令前标记，防止并发重复）
+    if event_id:
+        _mark_message_processed(event_id)
 
     logger.info(f"收到消息: {text}")
 

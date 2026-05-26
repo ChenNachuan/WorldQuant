@@ -115,6 +115,7 @@ WorldQuant/
 │   ├── llm_client.py              # 统一 LLM 客户端（Ollama + DeepSeek）
 │   ├── submission_quota.py        # 每日提交配额追踪
 │   ├── notifier.py                # 飞书通知模块
+│   ├── feishu_client.py           # 飞书 API 客户端（消息解析和回复）
 │   ├── data_fetcher.py            # 数据字段和运算符获取
 │   └── log_manager.py             # 日志管理（按天轮转）
 ├── data/                          # 运行时数据
@@ -132,6 +133,7 @@ WorldQuant/
 ├── submit_alpha.py                # 因子提交脚本
 ├── add_alpha.py                   # 手动添加因子脚本
 ├── check_correlation.py           # 相关性检查脚本
+├── feishu_bot.py                  # 飞书机器人指令控制系统
 ├── setup_cron.sh                  # 定时任务配置脚本
 ├── fetch_fields.py                # 字段和运算符获取脚本
 ├── mine.sh                        # 一键启动脚本
@@ -328,6 +330,54 @@ DeepSeek API 是推荐的选择，因为：
 配置方法：
 1. 飞书群 → 设置 → 机器人 → 添加自定义机器人
 2. 复制 Webhook URL 到 `.env` 的 `FEISHU_WEBHOOK`
+
+## 飞书机器人指令控制
+
+通过飞书群消息远程控制挖掘器、查询因子库、提交因子。
+
+### 环境变量
+
+```env
+FEISHU_APP_ID=your_app_id
+FEISHU_APP_SECRET=your_app_secret
+```
+
+### 启动服务
+
+```bash
+# 前台运行
+python feishu_bot.py
+
+# 后台运行（推荐）
+nohup python3.11 feishu_bot.py > log/feishu_bot.log 2>&1 &
+
+# 指定端口
+python feishu_bot.py --port 8080
+```
+
+### 支持命令
+
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `/summary` | 查看因子库统计和挖掘状态 | `/summary` |
+| `/start [workers]` | 启动挖掘器（默认 2 workers） | `/start 3` |
+| `/stop` | 停止挖掘器 | `/stop` |
+| `/check` | 运行相关性检查 | `/check` |
+| `/submit <id> [...]` | 提交指定因子 | `/submit akornja9 QPnwOqKr` |
+| `/list [数量] [状态]` | 查看因子列表 | `/list 50 submitted` |
+
+### Webhook 配置
+
+飞书开放平台 → 应用 → 事件订阅：
+- 请求地址：`http://<服务器IP>:9000/feishu/webhook`
+- 事件：`im.message.receive_v1`
+
+### 消息去重
+
+系统内置消息去重机制，防止飞书重试导致命令重复执行：
+- 使用飞书 `event_id` 作为唯一标识
+- 缓存 5 分钟自动过期
+- 进程重启后缓存会清空（正常情况无需担心，飞书重试窗口通常在几分钟内）
 
 ## 相关性检查
 
