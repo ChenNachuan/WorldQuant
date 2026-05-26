@@ -83,28 +83,31 @@ class FeishuClient:
 
     def reply_message(self, message_id: str, title: str, content: str) -> bool:
         """回复消息（Markdown 卡片格式）。"""
+        import json
         token = self._get_tenant_token()
         if not token:
             return False
 
-        # 飞书卡片 V2 格式
+        # 飞书卡片 V2 格式 - content 必须是字符串
+        card = {
+            "schema": "2.0",
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": "blue"
+            },
+            "body": {
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": content
+                    }
+                ]
+            }
+        }
+
         payload = {
             "msg_type": "interactive",
-            "content": {
-                "schema": "2.0",
-                "header": {
-                    "title": {"tag": "plain_text", "content": title},
-                    "template": "blue"
-                },
-                "body": {
-                    "elements": [
-                        {
-                            "tag": "markdown",
-                            "content": content
-                        }
-                    ]
-                }
-            }
+            "content": json.dumps(card, ensure_ascii=False)
         }
 
         try:
