@@ -268,9 +268,29 @@ class AlphaDB:
         region: str = None,
         universe: str = None,
         neutralization: str = None,
+        force: bool = False,
     ) -> int:
-        """Delete alpha records matching an expression and optional settings."""
+        """Delete alpha records matching an expression and optional settings.
+        Will not delete submitted alphas unless force=True."""
         with self._cursor() as cur:
+            if not force:
+                # First check if any matching alphas are submitted
+                check_query = "SELECT COUNT(*) as cnt FROM alphas WHERE expression = ? AND status = 'submitted'"
+                check_params = [expression]
+                if region is not None:
+                    check_query += " AND region = ?"
+                    check_params.append(region)
+                if universe is not None:
+                    check_query += " AND universe = ?"
+                    check_params.append(universe)
+                if neutralization is not None:
+                    check_query += " AND neutralization = ?"
+                    check_params.append(neutralization)
+                cur.execute(check_query, tuple(check_params))
+                if cur.fetchone()["cnt"] > 0:
+                    logger.warning(f"Cannot delete expression with submitted alphas: {expression}")
+                    return 0
+
             query = "DELETE FROM alphas WHERE expression = ?"
             params = [expression]
 
@@ -302,9 +322,17 @@ class AlphaDB:
             )
             return cur.rowcount
 
-    def delete_alpha_by_alpha_id(self, alpha_id: str) -> int:
-        """Delete alpha by alpha_id. Returns number of rows deleted."""
+    def delete_alpha_by_alpha_id(self, alpha_id: str, force: bool = False) -> int:
+        """Delete alpha by alpha_id. Returns number of rows deleted.
+        Will not delete submitted alphas unless force=True."""
         with self._cursor() as cur:
+            if not force:
+                # Check if alpha is submitted
+                cur.execute("SELECT status FROM alphas WHERE alpha_id = ?", (alpha_id,))
+                row = cur.fetchone()
+                if row and row["status"] == "submitted":
+                    logger.warning(f"Cannot delete submitted alpha: {alpha_id}")
+                    return 0
             cur.execute("DELETE FROM alphas WHERE alpha_id = ?", (alpha_id,))
             return cur.rowcount
 

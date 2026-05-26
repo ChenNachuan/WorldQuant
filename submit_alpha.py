@@ -77,6 +77,15 @@ def main():
     alpha_ids = sys.argv[1:]
 
     for alpha_id in alpha_ids:
+        # Check if already submitted
+        with db._cursor() as cur:
+            cur.execute("SELECT status FROM alphas WHERE alpha_id = ?", (alpha_id,))
+            row = cur.fetchone()
+            if row and row["status"] == "submitted":
+                print(f"Submitting alpha {alpha_id}...")
+                print(f"  ✗ Already submitted, skipping")
+                continue
+
         print(f"Submitting alpha {alpha_id}...")
         result = submit_alpha(session, alpha_id)
 
