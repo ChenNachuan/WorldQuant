@@ -277,6 +277,57 @@ def cmd_submit(args: list) -> tuple:
         return "提交失败", f"执行错误: {e}"
 
 
+def cmd_list(args: list) -> tuple:
+    """执行 /list 命令。返回 (title, content)。"""
+    db = get_alpha_db()
+
+    # 解析参数
+    limit = 20  # 默认显示 20 条
+    status_filter = None
+
+    for arg in args:
+        if arg.isdigit():
+            limit = min(int(arg), 100)  # 最多 100 条
+        elif arg in ["submitted", "unsubmitted", "pending", "tested"]:
+            status_filter = arg
+
+    # 查询数据
+    with db._cursor() as cur:
+        if status_filter:
+            cur.execute(
+                "SELECT alpha_id, status, grade, fitness, sharpe FROM alphas WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                (status_filter, limit)
+            )
+        else:
+            cur.execute(
+                "SELECT alpha_id, status, grade, fitness, sharpe FROM alphas ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+        rows = cur.fetchall()
+
+    if not rows:
+        return "因子列表", "暂无数据"
+
+    # 构建表格
+    lines = [f"## 因子列表（共 {len(rows)} 条）", ""]
+    lines.append("| Alpha ID | Status | Grade | Fitness | Sharpe |")
+    lines.append("|----------|--------|-------|---------|--------|")
+
+    for row in rows:
+        alpha_id = row["alpha_id"] or "-"
+        status = row["status"] or "-"
+        grade = row["grade"] or "-"
+        fitness = f"{row['fitness']:.4f}" if row["fitness"] else "-"
+        sharpe = f"{row['sharpe']:.4f}" if row["sharpe"] else "-"
+        lines.append(f"| {alpha_id} | {status} | {grade} | {fitness} | {sharpe} |")
+
+    # 添加使用提示
+    lines.append("")
+    lines.append("*提示: /list [数量] [状态]，例如: /list 50 submitted*")
+
+    return "因子列表", "\n".join(lines)
+
+
 # ── 命令路由 ─────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -285,6 +336,7 @@ COMMANDS = {
     "/stop": cmd_stop,
     "/check": cmd_check,
     "/submit": cmd_submit,
+    "/list": cmd_list,
 }
 
 
