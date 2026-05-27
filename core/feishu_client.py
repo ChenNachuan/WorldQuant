@@ -22,9 +22,9 @@ class FeishuClient:
     def enabled(self) -> bool:
         return bool(self.app_id and self.app_secret)
 
-    def _get_tenant_token(self) -> str:
+    def _get_tenant_token(self, force_refresh: bool = False) -> str:
         """获取 tenant_access_token（带缓存）。"""
-        if self._tenant_token:
+        if self._tenant_token and not force_refresh:
             return self._tenant_token
 
         resp = requests.post(
@@ -41,6 +41,7 @@ class FeishuClient:
             return self._tenant_token
         else:
             logger.error(f"获取 tenant_access_token 失败: {data}")
+            self._tenant_token = None
             return None
 
     def verify_challenge(self, body: dict) -> dict:
@@ -127,6 +128,24 @@ class FeishuClient:
                 timeout=10,
             )
             data = resp.json()
+
+            # Token 过期，刷新后重试一次
+            if data.get("code") == 99991663:
+                logger.info("Token 过期，刷新后重试...")
+                token = self._get_tenant_token(force_refresh=True)
+                if not token:
+                    return False
+                resp = requests.post(
+                    f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=10,
+                )
+                data = resp.json()
+
             if data.get("code") == 0:
                 logger.info(f"回复消息成功: {message_id}")
                 return True

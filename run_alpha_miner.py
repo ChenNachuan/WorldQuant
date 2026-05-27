@@ -890,6 +890,7 @@ VECTOR 字段使用限制：
                         logger.info(f"Discarding alpha {alpha_id} (non-rescuable checks: {failed_checks})")
             else:
                 logger.info(f"Found alpha! S={sharpe:.2f} F={fitness:.2f} (pending)")
+                self.stats["passed"] += 1
 
                 # 飞书通知
                 self.notifier.notify_alpha(
