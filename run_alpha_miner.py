@@ -45,14 +45,14 @@ RESCUE_THRESHOLD = 1.7
 
 # Parameter sweep settings for check failures
 SETTINGS_SWEEP = [
-    {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 5, "delay": 1},
-    {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 5, "delay": 0},
-    {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 10, "delay": 1},
-    {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 10, "delay": 0},
-    {"neutralization": "SECTOR", "truncation": 0.08, "decay": 20, "delay": 0},
-    {"neutralization": "SECTOR", "truncation": 0.08, "decay": 20, "delay": 1},
-    {"neutralization": "MARKET", "truncation": 0.2, "decay": 40, "delay": 1},
-    {"neutralization": "MARKET", "truncation": 0.2, "decay": 40, "delay": 0},
+    {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 10, "delay": 1},
+    {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 10, "delay": 0},
+    {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 20, "delay": 1},
+    {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 20, "delay": 0},
+    {"neutralization": "SECTOR", "truncation": 0.08, "decay": 30, "delay": 0},
+    {"neutralization": "SECTOR", "truncation": 0.08, "decay": 30, "delay": 1},
+    {"neutralization": "MARKET", "truncation": 0.2, "decay": 50, "delay": 1},
+    {"neutralization": "MARKET", "truncation": 0.2, "decay": 50, "delay": 0},
 ]
 
 # Check failure strategies
@@ -60,9 +60,10 @@ CHECK_STRATEGIES = {
     "TURNOVER": {
         "description": "换手率过高",
         "suggestions": [
-            "加大时序平滑窗口: ts_mean(x, 10) → ts_mean(x, 20)",
-            "增加衰减: ts_decay_linear(x, 5) → ts_decay_linear(x, 10)",
-            "使用 ts_rank 替换 zscore 降低换手"
+            "加大时序平滑窗口: ts_mean(x, 10) → ts_mean(x, 40)",
+            "增加衰减: ts_decay_linear(x, 10) → ts_decay_linear(x, 30)",
+            "使用 ts_rank 替换 zscore 降低换手",
+            "外壳衰减加倍: ts_decay_linear(zscore(...), 10) → ts_decay_linear(zscore(...), 20)"
         ]
     },
     "SELF_CORRELATION": {
@@ -97,6 +98,17 @@ SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
 
 def clean_expression(expr: str) -> str:
     """Fix common LLM mistakes in expressions."""
+    import re
+
+    # 修复科学计数法：1e-6 → 0.000001（FASTEXPR 不支持 e 记法）
+    def _fix_scientific(m: re.Match) -> str:
+        try:
+            return format(float(m.group(0)), 'f').rstrip('0').rstrip('.')
+        except (ValueError, OverflowError):
+            return m.group(0)
+
+    expr = re.sub(r'\b\d+\.?\d*e[+-]?\d+\b', _fix_scientific, expr)
+
     # WorldQuant Brain 使用函数形式的逻辑运算符：and(x,y), or(x,y), not(x)
     # 不是中缀形式：x and y, x & y
     # 暂时保留原样，因为简单的正则替换无法正确处理嵌套逻辑
@@ -517,16 +529,15 @@ class AlphaMiner:
         field_description += json.dumps(matrix_fields, ensure_ascii=False)
 
         if vector_fields:
-            field_description += "\n\n【VECTOR 字段】（event 类型，有严格限制）:\n"
+            field_description += "\n\n【⚠️ 以下 VECTOR 字段禁止使用 — WQ API 拒绝所有运算符】:\n"
             field_description += json.dumps(vector_fields, ensure_ascii=False)
             field_description += """
-VECTOR 字段使用限制：
-- ❌ 绝对不能用 > < >= <= 比较！
-- ❌ 不能参与算术运算（+,-,*,/）
-- ❌ 不能用 ts_delta, ts_mean, ts_sum, rank, sign 等运算符
-- ✓ 只能用 == 或 != 判断：if_else(field == 1, x, y)
-- ✓ 或用 sign() 转换后再比较：if_else(sign(field) == 1, x, y)
-- ✓ 或直接作为 trade_when 的条件：trade_when(field, x, y)"""
+VECTOR 字段绝对禁止使用：
+- ❌ == != > < >= <= 全部报错 "does not support event inputs"
+- ❌ sign(), trade_when(), rank(), zscore() 全部报错
+- ❌ 不能参与任何算术运算（+,-,*,/）
+- ❌ 不能用于 ts_delta, ts_mean, ts_sum, if_else 等任何地方
+- ⚠️ 只使用上方 MATRIX 字段！VECTOR 字段只是列出来让你知道不要用！"""
 
         prompt = f"""请利用以下提供的数据字段，生成 5 个具有爆发力的全新因子。
 
@@ -602,7 +613,7 @@ VECTOR 字段使用限制：
 父B: {parents[1]['expression']}
 
 【输出要求】
-输出3个变种，外壳必须为: ts_decay_linear(zscore(...), 5)
+输出3个变种，外壳必须为: ts_decay_linear(zscore(...), 10)
 中性化由settings控制，表达式中不要包含group_neutralize"""
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
@@ -1110,12 +1121,12 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
 
 【重要原则】
 - 只修改时序平滑参数，不要改变核心逻辑
-- 失败检查为 TURNOVER → 加大窗口 (10→20, 20→40)
+- 失败检查为 TURNOVER → 外壳 decay 加倍 (10→20, 20→40)，内部窗口加倍 (10→20, 20→40, 40→60)
 - 失败检查为 SELF_CORRELATION → 在settings中改变neutralization
 - 失败检查为 DRAWDOWN → 增加衰减平滑
 
 【输出要求】
-输出3个变种，外壳不变: ts_decay_linear(zscore(...), 5)
+输出3个变种，外壳不变: ts_decay_linear(zscore(...), 10)
 中性化由settings控制，表达式中不要包含group_neutralize"""
         else:
             # Case A: Poor performance - general optimization
@@ -1128,11 +1139,11 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
 【优化建议】
 1. 引入新的数据字段（如基本面、分析师、情绪数据）
 2. 更换核心算子：ts_mean↔ts_std_dev, ts_rank↔ts_zscore
-3. 调整时序窗口：5→10, 10→20
+3. 调整时序窗口：10→20, 20→40, 40→60
 4. 使用非线性变换：abs, log, sign, rank
 
 【输出要求】
-输出3个变种，外壳不变: ts_decay_linear(zscore(...), 5)
+输出3个变种，外壳不变: ts_decay_linear(zscore(...), 10)
 中性化由settings控制，表达式中不要包含group_neutralize"""
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
@@ -1176,12 +1187,12 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
 
 【重要原则】
 - 只修改时序平滑参数，不要改变核心逻辑
-- 失败检查为 TURNOVER → 加大窗口 (10→20, 20→40)
+- 失败检查为 TURNOVER → 外壳 decay 加倍 (10→20, 20→40)，内部窗口加倍 (10→20, 20→40, 40→60)
 - 失败检查为 SELF_CORRELATION → 在settings中改变neutralization
 - 失败检查为 DRAWDOWN → 增加衰减平滑
 
 【输出要求】
-输出3个变种，外壳不变: ts_decay_linear(zscore(...), 5)
+输出3个变种，外壳不变: ts_decay_linear(zscore(...), 10)
 中性化由settings控制，表达式中不要包含group_neutralize"""
         else:
             # Case A: Poor performance - general optimization
@@ -1194,11 +1205,11 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
 【优化建议】
 1. 引入新的数据字段（如基本面、分析师、情绪数据）
 2. 更换核心算子：ts_mean↔ts_std_dev, ts_rank↔ts_zscore
-3. 调整时序窗口：5→10, 10→20
+3. 调整时序窗口：10→20, 20→40, 40→60
 4. 使用非线性变换：abs, log, sign, rank
 
 【输出要求】
-输出3个变种，外壳不变: ts_decay_linear(zscore(...), 5)
+输出3个变种，外壳不变: ts_decay_linear(zscore(...), 10)
 中性化由settings控制，表达式中不要包含group_neutralize"""
 
         variants = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
