@@ -183,9 +183,9 @@ class Notifier:
             lines.append(f"- 待检查: **{summary.get('pending', 0)}**")
             lines.append(f"- 可提交: **{summary.get('unsubmitted', 0)}**")
             lines.append("")
-            lines.append("## 过去 24 小时")
-            lines.append(f"- 新增因子: **{summary.get('new_24h', 0)}**")
-            lines.append(f"- 可提交: **{summary.get('submittable_24h', 0)}**")
+            lines.append("## 累计统计")
+            lines.append(f"- 全部因子: **{summary.get('new_all_time', 0)}**")
+            lines.append(f"- 可提交: **{summary.get('submittable_all_time', 0)}**")
 
         self.send_markdown("相关性检查报告", "\n".join(lines))
 

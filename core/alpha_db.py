@@ -527,24 +527,51 @@ class AlphaDB:
             cur.execute("SELECT COUNT(*) as count FROM alphas WHERE status = 'pending'")
             pending = cur.fetchone()["count"]
 
-            # Last 24 hours
+            # All-time submittable count
             cur.execute("""
                 SELECT COUNT(*) as total,
                        SUM(CASE WHEN sharpe >= 1.25 AND fitness >= 1.0 THEN 1 ELSE 0 END) as submittable
                 FROM alphas
-                WHERE created_at >= datetime('now', '-1 day')
             """)
-            row_24h = cur.fetchone()
-            new_24h = row_24h["total"]
-            submittable_24h = row_24h["submittable"] or 0
+            row_all = cur.fetchone()
+            new_all = row_all["total"]
+            submittable_all = row_all["submittable"] or 0
 
             return {
                 "total": total,
                 "submitted": submitted,
                 "unsubmitted": unsubmitted,
                 "pending": pending,
-                "new_24h": new_24h,
-                "submittable_24h": submittable_24h,
+                "new_all_time": new_all,
+                "submittable_all_time": submittable_all,
+            }
+
+    def get_all_time_stats(self) -> Dict:
+        """Get all-time cumulative statistics for mining progress summary."""
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) as total FROM alphas")
+            total = cur.fetchone()["total"]
+
+            cur.execute("""
+                SELECT COUNT(*) as passed FROM alphas
+                WHERE sharpe >= 1.25 AND fitness >= 1.0
+            """)
+            passed = cur.fetchone()["passed"]
+
+            cur.execute("SELECT MAX(sharpe) as best_sharpe FROM alphas")
+            best_sharpe = cur.fetchone()["best_sharpe"] or 0
+
+            cur.execute("SELECT MAX(fitness) as best_fitness FROM alphas")
+            best_fitness = cur.fetchone()["best_fitness"] or 0
+
+            failed = total - passed
+
+            return {
+                "tested": total,
+                "passed": passed,
+                "failed": failed,
+                "best_sharpe": best_sharpe,
+                "best_fitness": best_fitness,
             }
 
 

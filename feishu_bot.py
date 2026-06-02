@@ -189,9 +189,9 @@ def cmd_summary(args: list) -> tuple:
         f"- 待检查: **{summary['pending']}**",
         f"- 可提交: **{summary['unsubmitted']}**",
         "",
-        "## 过去 24 小时",
-        f"- 新增因子: **{summary['new_24h']}**",
-        f"- 可提交: **{summary['submittable_24h']}**",
+        "## 累计统计",
+        f"- 全部因子: **{summary['new_all_time']}**",
+        f"- 可提交: **{summary['submittable_all_time']}**",
     ]
 
     # 挖掘状态

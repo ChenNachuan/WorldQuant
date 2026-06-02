@@ -204,8 +204,8 @@ def main():
     print(f"  总数: {summary['total']}")
     print(f"  已提交: {summary['submitted']}")
     print(f"  未提交: {summary['unsubmitted']}")
-    print(f"  过去24h新增: {summary['new_24h']}")
-    print(f"  过去24h可提交: {summary['submittable_24h']}")
+    print(f"  累计因子: {summary['new_all_time']}")
+    print(f"  累计可提交: {summary['submittable_all_time']}")
 
     # Send Feishu notification
     if not args.no_notify and notifier.enabled:

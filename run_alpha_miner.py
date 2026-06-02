@@ -46,9 +46,13 @@ RESCUE_THRESHOLD = 1.7
 # Parameter sweep settings for check failures
 SETTINGS_SWEEP = [
     {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 5, "delay": 1},
+    {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 5, "delay": 0},
     {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 10, "delay": 1},
+    {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 10, "delay": 0},
     {"neutralization": "SECTOR", "truncation": 0.08, "decay": 20, "delay": 0},
+    {"neutralization": "SECTOR", "truncation": 0.08, "decay": 20, "delay": 1},
     {"neutralization": "MARKET", "truncation": 0.2, "decay": 40, "delay": 1},
+    {"neutralization": "MARKET", "truncation": 0.2, "decay": 40, "delay": 0},
 ]
 
 # Check failure strategies
@@ -125,7 +129,7 @@ class AlphaMiner:
 
     def __init__(self, llm_provider: str = "auto", member_id: str = "default",
                  username: str = None, password: str = None,
-                 delay0_prob: float = 0.3):
+                 delay0_prob: float = 0.5):
         self.llm_client = get_llm_client(llm_provider)
         self.alpha_db = get_alpha_db()
         self.quota = get_submission_quota()
@@ -531,6 +535,7 @@ VECTOR 字段使用限制：
 2. 不能使用 total_assets, book_value_per_share, return_on_equity 等不存在的字段
 3. 如果需要总资产，用 assets；如果需要权益，用 equity；如果需要长期负债，用 debt_lt
 4. 逻辑运算符必须使用函数形式：and(x,y), or(x,y), not(x)，禁止使用 & | ~ 或中缀形式
+5. 当前数据字段为 delay={delay}，所有生成的因子 settings 中 delay 必须设置为 {delay}
 
 {field_description}"""
 
@@ -643,11 +648,14 @@ VECTOR 字段使用限制：
             "visualization": False
         }
 
-        # Apply custom settings if provided
+        # Apply custom settings if provided (delay 由系统控制，不由 LLM 覆盖)
+        actual_delay = factor.get("delay", 1)
         if isinstance(factor.get("settings"), dict):
             for k, v in factor["settings"].items():
-                if k in settings:
+                if k in settings and k != "delay":
                     settings[k] = v
+        # 再次确保 delay 使用系统设定的值，不被 LLM 输出的 settings 覆盖
+        settings["delay"] = actual_delay
 
         payload = {
             "type": "REGULAR",
@@ -1290,16 +1298,15 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
                             f"Module weights: {self.module_stats}"
                         )
 
-                        # 每 100 个因子发送汇总通知
+                        # 每 100 个因子发送汇总通知（使用 DB 全量统计）
                         if self.stats["tested"] % 100 == 0:
-                            top_alphas = self.alpha_db.get_successful_alphas(limit=1)
-                            best_f = top_alphas[0]["fitness"] if top_alphas else 0
+                            db_stats = self.alpha_db.get_all_time_stats()
                             self.notifier.notify_summary(
-                                tested=self.stats["tested"],
-                                passed=self.stats["passed"],
-                                failed=self.stats["failed"],
-                                best_sharpe=self.stats["best_sharpe"],
-                                best_fitness=best_f,
+                                tested=db_stats["tested"],
+                                passed=db_stats["passed"],
+                                failed=db_stats["failed"],
+                                best_sharpe=db_stats["best_sharpe"],
+                                best_fitness=db_stats["best_fitness"],
                                 rescue_pool=rescue_count,
                                 member_id=self.member_id,
                             )
@@ -1350,8 +1357,8 @@ def main():
     parser.add_argument(
         "--delay0-prob",
         type=float,
-        default=0.3,
-        help="Probability of mining delay=0 factors (default: 0.3)"
+        default=0.5,
+        help="Probability of mining delay=0 factors (default: 0.5)"
     )
     args = parser.parse_args()
 
