@@ -154,6 +154,9 @@ class AlphaMiner:
         # Session state
         self.session = None
         self.tested_expressions = set()
+        self._token_expires_at = 0  # Token过期时间戳
+        self._auth_retry_count = 0  # 认证重试次数
+        self._failed_patterns = {}  # 失败模式记录 {pattern: count}
 
         # Queues
         self.llm_task_queue = queue.Queue()
@@ -266,6 +269,7 @@ class AlphaMiner:
         """Authenticate with WorldQuant Brain API."""
         import requests
         from requests.auth import HTTPBasicAuth
+        import time
 
         username, password = load_credentials()
 
@@ -286,13 +290,30 @@ class AlphaMiner:
             )
             if resp.status_code == 201:
                 logger.info("Authentication successful")
+                # 设置token过期时间（假设2小时，实际可能更短）
+                self._token_expires_at = time.time() + 7200  # 2小时
+                self._auth_retry_count = 0  # 重置重试次数
                 return True
             else:
                 logger.error(f"Authentication failed: {resp.text}")
+                self._auth_retry_count += 1
                 return False
         except Exception as e:
             logger.error(f"Authentication error: {e}")
+            self._auth_retry_count += 1
             return False
+
+    def _is_token_expired(self) -> bool:
+        """检查token是否即将过期（提前5分钟）"""
+        import time
+        return time.time() > (self._token_expires_at - 300)  # 提前5分钟
+
+    def _ensure_authenticated(self) -> bool:
+        """确保认证有效，如果即将过期则刷新"""
+        if self._is_token_expired():
+            logger.info("Token即将过期，重新认证...")
+            return self.authenticate()
+        return True
 
     # ==========================================
     # Field Loading (from CSV files)
@@ -548,6 +569,17 @@ VECTOR 字段绝对禁止使用：
 4. 逻辑运算符必须使用函数形式：and(x,y), or(x,y), not(x)，禁止使用 & | ~ 或中缀形式
 5. 当前数据字段为 delay={delay}，所有生成的因子 settings 中 delay 必须设置为 {delay}
 
+【避免常见失败模式】
+- 高换手率 (HIGH_TURNOVER): 使用较大的衰减窗口 (ts_decay_linear(x, 20) 或更大)，避免过于敏感的信号
+- 权重集中 (CONCENTRATED_WEIGHT): 使用 zscore 或 rank 进行标准化，避免极端权重
+- 子宇宙Sharpe低 (LOW_SUB_UNIVERSE_SHARPE): 使用行业或板块中性化，避免过度依赖特定股票
+
+【推荐的因子结构】
+1. 外壳: ts_decay_linear(zscore(...), 20)  # 使用较大衰减窗口降低换手率
+2. 核心逻辑: 使用 rank, zscore, ts_mean 等标准化函数
+3. 中性化: 在 settings 中设置 neutralization: "INDUSTRY" 或 "SUBINDUSTRY"
+4. 截断: 在 settings 中设置 truncation: 0.08 或 0.1
+
 {field_description}"""
 
         results = self.llm_client.generate_alphas(DEFAULT_SYSTEM_PROMPT, prompt)
@@ -575,12 +607,93 @@ VECTOR 字段绝对禁止使用：
                 logger.warning(f"Skipping expression with unknown variables: {expression[:60]}...")
                 continue
 
+            # 验证表达式质量
+            if not self._validate_expression_quality(expression):
+                logger.warning(f"Skipping low quality expression: {expression[:60]}...")
+                continue
+
             res['expression'] = clean_expression(expression)
             res['modules_used'] = modules_used
             res['delay'] = delay  # 添加 delay 值
             valid_results.append(res)
 
         return valid_results
+
+    def _validate_expression_quality(self, expression: str) -> bool:
+        """
+        验证表达式质量，提前过滤低质量表达式。
+        返回True表示表达式质量合格，False表示应该跳过。
+        """
+        # 检查表达式长度（太短可能逻辑不完整）
+        if len(expression) < 20:
+            return False
+
+        # 检查是否包含基本的标准化函数
+        has_normalization = any(func in expression for func in ['zscore', 'rank', 'ts_rank', 'ts_zscore'])
+        if not has_normalization:
+            return False
+
+        # 检查是否包含时序平滑
+        has_smoothing = any(func in expression for func in ['ts_decay_linear', 'ts_mean', 'ts_std_dev'])
+        if not has_smoothing:
+            return False
+
+        # 检查是否包含太多嵌套（可能导致计算复杂度过高）
+        nesting_depth = 0
+        max_nesting = 0
+        for char in expression:
+            if char == '(':
+                nesting_depth += 1
+                max_nesting = max(max_nesting, nesting_depth)
+            elif char == ')':
+                nesting_depth -= 1
+
+        # 如果嵌套深度超过8层，可能过于复杂
+        if max_nesting > 8:
+            return False
+
+        # 检查是否包含常见的错误模式
+        error_patterns = [
+            'ts_min',  # 不存在的函数
+            'ts_max',  # 不存在的函数
+            'group_neutralize',  # 不应该在表达式中
+            '"',  # 不应该有引号
+            "'",  # 不应该有引号
+        ]
+
+        for pattern in error_patterns:
+            if pattern in expression:
+                return False
+
+        return True
+
+    def _record_failed_pattern(self, expression: str, failed_checks: list):
+        """
+        记录失败模式，用于避免重复生成类似表达式。
+        """
+        # 提取表达式的核心模式（去掉具体参数）
+        import re
+
+        # 简化表达式，去掉数字参数
+        simplified = re.sub(r'\d+', 'N', expression)
+
+        # 记录失败模式
+        pattern_key = simplified[:100]  # 只取前100个字符作为模式
+        if pattern_key not in self._failed_patterns:
+            self._failed_patterns[pattern_key] = {
+                "count": 0,
+                "checks": set(),
+                "example": expression[:80]
+            }
+
+        self._failed_patterns[pattern_key]["count"] += 1
+        self._failed_patterns[pattern_key]["checks"].update(failed_checks)
+
+        # 如果同一个模式失败超过3次，记录到日志
+        if self._failed_patterns[pattern_key]["count"] >= 3:
+            logger.warning(f"Repeated failure pattern detected: {pattern_key[:50]}... "
+                          f"(failed {self._failed_patterns[pattern_key]['count']} times, "
+                          f"checks: {failed_checks})")
 
     def generate_crossover_alphas(self) -> List[Dict]:
         """Generate alphas by crossing over elite factors from shared pool using non-linear operations."""
@@ -636,6 +749,10 @@ VECTOR 字段绝对禁止使用：
 
     def simulate_factor(self, factor: Dict) -> Dict:
         """Submit factor for backtesting and poll for results."""
+        # 确保认证有效
+        if not self._ensure_authenticated():
+            return {"error": "AUTH_FAILED"}
+
         if not self.session:
             return {"error": "Not authenticated"}
 
@@ -686,6 +803,17 @@ VECTOR 字段绝对禁止使用：
 
                 # Handle auth failures
                 if resp.status_code in [401, 403] or "Incorrect authentication" in resp.text:
+                    # 尝试重新认证
+                    if self.authenticate():
+                        # 重新认证成功，重试请求
+                        resp = self.session.post(
+                            f"{BASE_URL}/simulations",
+                            json=payload,
+                            verify=False,
+                            timeout=30
+                        )
+                        if resp.status_code == 201:
+                            break
                     return {"error": "AUTH_FAILED"}
 
                 # Handle concurrent limit
@@ -713,9 +841,12 @@ VECTOR 字段绝对禁止使用：
         except Exception as e:
             return {"error": f"Exception: {str(e)}"}
 
-    def _poll_simulation(self, sim_id: str, timeout: int = 600) -> Dict:
-        """Poll simulation until complete or timeout."""
+    def _poll_simulation(self, sim_id: str, timeout: int = 300) -> Dict:
+        """Poll simulation until complete or timeout. 使用指数退避策略。"""
         start_time = time.time()
+        poll_interval = 2  # 初始轮询间隔2秒
+        max_poll_interval = 16  # 最大轮询间隔16秒
+        poll_count = 0
 
         while time.time() - start_time < timeout:
             try:
@@ -726,7 +857,8 @@ VECTOR 字段绝对禁止使用：
                 )
 
                 if resp.status_code != 200:
-                    time.sleep(3)
+                    time.sleep(poll_interval)
+                    poll_interval = min(poll_interval * 2, max_poll_interval)
                     continue
 
                 data = resp.json()
@@ -770,11 +902,17 @@ VECTOR 字段绝对禁止使用：
                 elif status in ["ERROR", "FAILED"]:
                     return {"error": data.get("message", "Unknown error")}
 
-                time.sleep(3)
+                # 指数退避：如果连续多次都是PENDING状态，增加等待间隔
+                poll_count += 1
+                if poll_count > 3 and status == "PENDING":
+                    poll_interval = min(poll_interval * 1.5, max_poll_interval)
+
+                time.sleep(poll_interval)
 
             except Exception as e:
                 logger.warning(f"Poll error: {e}")
-                time.sleep(3)
+                time.sleep(poll_interval)
+                poll_interval = min(poll_interval * 2, max_poll_interval)
 
         return {"error": "Simulation timeout"}
 
@@ -888,6 +1026,9 @@ VECTOR 字段绝对禁止使用：
                 logger.warning(f"Alpha {alpha_id} failed checks: {failed_checks}")
                 logger.warning(f"  Expression: {expression[:80]}...")
                 logger.warning(f"  S={sharpe:.2f} F={fitness:.2f} T={turnover:.2f}")
+
+                # 记录失败模式
+                self._record_failed_pattern(expression, failed_checks)
 
                 # Try parameter sweep first
                 if self._try_parameter_sweep(alpha_id, expression, failed_checks):
@@ -1027,15 +1168,76 @@ VECTOR 字段绝对禁止使用：
                 logger.error(f"LLM producer error: {e}")
                 time.sleep(5)
 
+    def _select_best_params(self, failed_checks: list) -> list:
+        """
+        根据失败类型智能选择最可能成功的参数组合。
+        返回排序后的参数组合列表，最可能成功的在前。
+        """
+        # 分析失败类型
+        has_turnover = any("TURNOVER" in check.upper() for check in failed_checks)
+        has_concentrated = any("CONCENTRATED" in check.upper() for check in failed_checks)
+        has_sub_universe = any("SUB_UNIVERSE" in check.upper() for check in failed_checks)
+
+        # 根据失败类型选择最佳参数组合
+        if has_turnover:
+            # 高换手率：优先尝试高decay和高truncation
+            priority_params = [
+                {"neutralization": "MARKET", "truncation": 0.2, "decay": 50, "delay": 1},
+                {"neutralization": "MARKET", "truncation": 0.2, "decay": 50, "delay": 0},
+                {"neutralization": "SECTOR", "truncation": 0.08, "decay": 30, "delay": 0},
+                {"neutralization": "SECTOR", "truncation": 0.08, "decay": 30, "delay": 1},
+                {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 20, "delay": 1},
+                {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 20, "delay": 0},
+                {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 10, "delay": 1},
+                {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 10, "delay": 0},
+            ]
+        elif has_concentrated:
+            # 权重集中：优先尝试INDUSTRY/SUBINDUSTRY中性化
+            priority_params = [
+                {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 10, "delay": 1},
+                {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 10, "delay": 0},
+                {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 20, "delay": 1},
+                {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 20, "delay": 0},
+                {"neutralization": "SECTOR", "truncation": 0.08, "decay": 30, "delay": 0},
+                {"neutralization": "SECTOR", "truncation": 0.08, "decay": 30, "delay": 1},
+                {"neutralization": "MARKET", "truncation": 0.2, "decay": 50, "delay": 1},
+                {"neutralization": "MARKET", "truncation": 0.2, "decay": 50, "delay": 0},
+            ]
+        elif has_sub_universe:
+            # 子宇宙Sharpe低：优先尝试SECTOR/MARKET中性化
+            priority_params = [
+                {"neutralization": "SECTOR", "truncation": 0.08, "decay": 30, "delay": 0},
+                {"neutralization": "SECTOR", "truncation": 0.08, "decay": 30, "delay": 1},
+                {"neutralization": "MARKET", "truncation": 0.2, "decay": 50, "delay": 1},
+                {"neutralization": "MARKET", "truncation": 0.2, "decay": 50, "delay": 0},
+                {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 20, "delay": 1},
+                {"neutralization": "SUBINDUSTRY", "truncation": 0.15, "decay": 20, "delay": 0},
+                {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 10, "delay": 1},
+                {"neutralization": "INDUSTRY", "truncation": 0.1, "decay": 10, "delay": 0},
+            ]
+        else:
+            # 默认顺序
+            priority_params = SETTINGS_SWEEP
+
+        return priority_params
+
     def _try_parameter_sweep(self, alpha_id: str, expression: str, failed_checks: list) -> bool:
         """
         Try different parameter combinations to fix check failures.
+        使用智能参数选择和提前终止策略。
         Returns True if any combination passes all checks.
         """
         logger.info(f"Trying parameter sweep for alpha {alpha_id}...")
 
-        for i, settings in enumerate(SETTINGS_SWEEP):
-            logger.info(f"  Sweep {i+1}/{len(SETTINGS_SWEEP)}: {settings}")
+        # 智能选择参数组合
+        params_to_try = self._select_best_params(failed_checks)
+
+        # 记录连续失败次数，用于提前终止
+        consecutive_failures = 0
+        max_consecutive_failures = 3  # 连续失败3次后提前终止
+
+        for i, settings in enumerate(params_to_try):
+            logger.info(f"  Sweep {i+1}/{len(params_to_try)}: {settings}")
             result = self.simulate_factor({
                 "expression": expression,
                 "settings": settings
@@ -1069,6 +1271,16 @@ VECTOR 字段绝对禁止使用：
                         status="pending",
                     )
                     return True
+                else:
+                    consecutive_failures += 1
+                    # 提前终止：如果连续失败3次，且剩余组合都是类似参数
+                    if consecutive_failures >= max_consecutive_failures and i >= 3:
+                        logger.info(f"  Early termination after {consecutive_failures} consecutive failures")
+                        break
+            else:
+                # 如果是认证错误，不计入连续失败
+                if result.get("error") != "AUTH_FAILED":
+                    consecutive_failures += 1
 
         logger.info(f"All parameter sweep combinations failed for alpha {alpha_id}")
         return False
@@ -1228,7 +1440,7 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
     # Main Execution Loop
     # ==========================================
 
-    def run(self, max_workers: int = 2):
+    def run(self, max_workers: int = 3):
         """Main execution loop."""
         if not self.authenticate():
             logger.error("Failed to authenticate, exiting")
@@ -1344,8 +1556,8 @@ def main():
     parser.add_argument(
         "--workers",
         type=int,
-        default=2,
-        help="Number of concurrent simulation workers"
+        default=3,
+        help="Number of concurrent simulation workers (default: 3)"
     )
     parser.add_argument(
         "--member-id",
