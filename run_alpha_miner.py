@@ -1440,7 +1440,7 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
     # Main Execution Loop
     # ==========================================
 
-    def run(self, max_workers: int = 3):
+    def run(self, max_workers: int = 2):
         """Main execution loop."""
         if not self.authenticate():
             logger.error("Failed to authenticate, exiting")
@@ -1556,8 +1556,8 @@ def main():
     parser.add_argument(
         "--workers",
         type=int,
-        default=3,
-        help="Number of concurrent simulation workers (default: 3)"
+        default=2,
+        help="Number of concurrent simulation workers (default: 2, max: 2 due to API limit)"
     )
     parser.add_argument(
         "--member-id",
