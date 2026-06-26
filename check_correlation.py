@@ -56,7 +56,14 @@ def check_alpha(session: requests.Session, alpha_id: str, max_wait: int = 120) -
                 timeout=30
             )
 
-            # 检查 Retry-After 头
+            # 处理 429 限流：有 Retry-After 用它，没有则默认等 10 秒
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else 10
+                time.sleep(wait if wait > 0 else 10)
+                continue
+
+            # 检查 Retry-After 头（非 429 状态码）
             retry_after = resp.headers.get("Retry-After")
             if retry_after:
                 wait = float(retry_after)
