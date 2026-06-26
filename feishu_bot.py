@@ -228,41 +228,105 @@ def cmd_stop(args: list) -> tuple:
 
 
 def cmd_check(args: list) -> tuple:
-    """执行 /check 命令。返回 (title, content)。"""
+    """执行 /check 命令。循环分批检查，每批 5 个，每批限时 300s。返回 (title, content)。"""
+    import json as _json
+
+    BATCH_SIZE = 5
+    BATCH_TIMEOUT = 300  # 每批 300 秒
+
     try:
-        result = subprocess.run(
-            [sys.executable, "check_correlation.py", "--no-notify"],
-            cwd=PROJECT_DIR,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        # 先获取 pending 数量
+        from core.alpha_db import get_alpha_db
+        db = get_alpha_db()
+        all_alphas = db.get_all_alphas(limit=10000)
+        pending = [a for a in all_alphas if a.get("status") == "pending"]
+        total_pending = len(pending)
 
-        # 解析输出
-        output = result.stdout
-        lines = ["## 相关性检查结果", ""]
+        if total_pending == 0:
+            return "相关性检查", "没有 pending 的 alpha"
 
-        # 提取关键信息
-        for line in output.split("\n"):
-            if "找到" in line and "pending" in line:
-                lines.append(f"- {line.strip()}")
-            elif "PASS:" in line:
-                lines.append(f"- {line.strip()}")
-            elif "FAIL:" in line:
-                lines.append(f"- {line.strip()}")
-            elif "已删除:" in line:
-                lines.append(f"- {line.strip()}")
-            elif "错误:" in line:
-                lines.append(f"- {line.strip()}")
+        # 聚合统计
+        agg = {
+            "total": 0, "pass": 0, "fail": 0, "pending": 0,
+            "updated": 0, "deleted": 0, "error": 0,
+            "failed_alphas": [],
+        }
+        summary = {}
+        num_batches = (total_pending + BATCH_SIZE - 1) // BATCH_SIZE
 
-        if result.returncode != 0:
+        lines = [f"## 相关性检查结果", "", f"共 {total_pending} 个 pending，分 {num_batches} 批检查（每批 {BATCH_SIZE} 个）", ""]
+
+        for batch_idx in range(num_batches):
+            offset = batch_idx * BATCH_SIZE
+            lines.append(f"**批次 {batch_idx + 1}/{num_batches}**（第 {offset + 1}-{min(offset + BATCH_SIZE, total_pending)} 个）")
+
+            try:
+                result = subprocess.run(
+                    [sys.executable, "check_correlation.py", "--no-notify", "--batch-mode",
+                     "--limit", str(BATCH_SIZE)],
+                    cwd=PROJECT_DIR,
+                    capture_output=True,
+                    text=True,
+                    timeout=BATCH_TIMEOUT,
+                )
+
+                # 解析 JSON 输出
+                output = result.stdout
+                marker = "__BATCH_RESULT__"
+                if marker in output:
+                    json_str = output.split(marker, 1)[1].strip()
+                    batch = _json.loads(json_str)
+                    agg["total"] += batch.get("total", 0)
+                    agg["pass"] += batch.get("pass", 0)
+                    agg["fail"] += batch.get("fail", 0)
+                    agg["pending"] += batch.get("pending", 0)
+                    agg["updated"] += batch.get("updated", 0)
+                    agg["deleted"] += batch.get("deleted", 0)
+                    agg["error"] += batch.get("error", 0)
+                    agg["failed_alphas"].extend(batch.get("failed_alphas", []))
+                    summary = batch.get("summary", summary)
+
+                    lines.append(f"  - PASS: {batch.get('pass', 0)}, FAIL: {batch.get('fail', 0)}, PENDING: {batch.get('pending', 0)}")
+                else:
+                    lines.append(f"  - ⚠️ 未解析到结果")
+
+            except subprocess.TimeoutExpired:
+                lines.append(f"  - ⏰ 超时（>{BATCH_TIMEOUT}s）")
+            except Exception as e:
+                lines.append(f"  - ❌ 错误: {e}")
+
+        # 汇总
+        lines.append("")
+        lines.append("### 汇总")
+        lines.append(f"- 总数: {agg['total']}")
+        lines.append(f"- PASS: {agg['pass']} ✅")
+        lines.append(f"- FAIL: {agg['fail']} ❌")
+        lines.append(f"- PENDING: {agg['pending']}")
+        if agg['deleted'] > 0:
+            lines.append(f"- 已删除: {agg['deleted']}")
+        if agg['error'] > 0:
+            lines.append(f"- 错误: {agg['error']}")
+        if summary:
             lines.append("")
-            lines.append(f"**错误:** {result.stderr[:200]}")
+            lines.append("### 因子库")
+            lines.append(f"- 总数: {summary.get('total', '?')}")
+            lines.append(f"- 已提交: {summary.get('submitted', '?')}")
+            lines.append(f"- 累计因子: {summary.get('new_all_time', '?')}")
+
+        # 发送飞书通知
+        from core.notifier import get_notifier
+        notifier = get_notifier()
+        if notifier.enabled and (agg['pass'] > 0 or agg['fail'] > 0):
+            notifier.notify_correlation_check(
+                total=agg['total'],
+                passed=agg['pass'],
+                failed=agg['fail'],
+                failed_alphas=agg['failed_alphas'],
+                summary=summary,
+            )
 
         return "相关性检查", "\n".join(lines)
 
-    except subprocess.TimeoutExpired:
-        return "检查超时", "相关性检查执行超时（>300s）"
     except Exception as e:
         return "检查失败", f"执行错误: {e}"
 

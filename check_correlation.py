@@ -94,6 +94,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只检查，不更新数据库")
     parser.add_argument("--keep-fail", action="store_true", help="保留 SELF_CORRELATION FAIL 的 alpha（默认删除）")
     parser.add_argument("--no-notify", action="store_true", help="不发送飞书通知")
+    parser.add_argument("--limit", type=int, default=0, help="最多检查 N 个 alpha（0=全部）")
+    parser.add_argument("--batch-mode", action="store_true", help="批次模式：输出 JSON 格式结果供外部脚本聚合")
     args = parser.parse_args()
 
     # Authenticate
@@ -118,6 +120,10 @@ def main():
     if not unsubmitted:
         print("没有 pending 的 alpha")
         return
+
+    # 支持 --limit 参数，只检查前 N 个
+    if args.limit > 0:
+        unsubmitted = unsubmitted[:args.limit]
 
     print(f"找到 {len(unsubmitted)} 个 pending alpha\n")
 
@@ -206,6 +212,24 @@ def main():
     print(f"  未提交: {summary['unsubmitted']}")
     print(f"  累计因子: {summary['new_all_time']}")
     print(f"  累计可提交: {summary['submittable_all_time']}")
+
+    # 批次模式：输出 JSON 给外部脚本聚合，不发通知
+    if args.batch_mode:
+        import json
+        batch_result = {
+            "total": stats["total"],
+            "pass": stats["pass"],
+            "fail": stats["fail"],
+            "pending": stats["pending"],
+            "updated": stats["updated"],
+            "deleted": stats["deleted"],
+            "error": stats["error"],
+            "failed_alphas": failed_alphas,
+            "summary": summary,
+        }
+        print("\n__BATCH_RESULT__")
+        print(json.dumps(batch_result, ensure_ascii=False))
+        return
 
     # Send Feishu notification
     if not args.no_notify and notifier.enabled:
