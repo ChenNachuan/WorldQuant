@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--no-notify", action="store_true", help="不发送飞书通知")
     parser.add_argument("--limit", type=int, default=0, help="最多检查 N 个 alpha（0=全部）")
     parser.add_argument("--batch-mode", action="store_true", help="批次模式：输出 JSON 格式结果供外部脚本聚合")
+    parser.add_argument("--alpha-ids", type=str, default="", help="指定要检查的 alpha ID 列表（逗号分隔），跳过数据库查询")
     args = parser.parse_args()
 
     # Authenticate
@@ -113,9 +114,17 @@ def main():
     db = get_alpha_db()
     notifier = get_notifier()
 
-    # Get all pending alphas (waiting for correlation check)
-    alphas = db.get_all_alphas(limit=10000)
-    unsubmitted = [a for a in alphas if a.get("status") == "pending"]
+    # 支持 --alpha-ids 参数：直接使用指定的 alpha ID 列表，不查数据库
+    if args.alpha_ids:
+        target_ids = [aid.strip() for aid in args.alpha_ids.split(',') if aid.strip()]
+        all_alphas = db.get_all_alphas(limit=10000)
+        alpha_map = {a.get('alpha_id'): a for a in all_alphas}
+        unsubmitted = [alpha_map[aid] for aid in target_ids if aid in alpha_map]
+        print(f"使用指定的 {len(unsubmitted)} 个 alpha ID")
+    else:
+        # Get all pending alphas (waiting for correlation check)
+        alphas = db.get_all_alphas(limit=10000)
+        unsubmitted = [a for a in alphas if a.get("status") == "pending"]
 
     if not unsubmitted:
         print("没有 pending 的 alpha")

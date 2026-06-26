@@ -235,12 +235,13 @@ def cmd_check(args: list) -> tuple:
     BATCH_TIMEOUT = 300  # 每批 300 秒
 
     try:
-        # 先获取 pending 数量
+        # 先获取 pending 列表，固定 alpha ID 避免各批次重复查询
         from core.alpha_db import get_alpha_db
         db = get_alpha_db()
         all_alphas = db.get_all_alphas(limit=10000)
         pending = [a for a in all_alphas if a.get("status") == "pending"]
-        total_pending = len(pending)
+        pending_ids = [a["alpha_id"] for a in pending if a.get("alpha_id")]
+        total_pending = len(pending_ids)
 
         if total_pending == 0:
             return "相关性检查", "没有 pending 的 alpha"
@@ -254,16 +255,16 @@ def cmd_check(args: list) -> tuple:
         summary = {}
         num_batches = (total_pending + BATCH_SIZE - 1) // BATCH_SIZE
 
-        lines = [f"## 相关性检查结果", "", f"共 {total_pending} 个 pending，分 {num_batches} 批检查（每批 {BATCH_SIZE} 个）", ""]
+        lines = ["## 相关性检查结果", "", f"共 {total_pending} 个 pending，分 {num_batches} 批检查（每批 {BATCH_SIZE} 个）", ""]
 
         for batch_idx in range(num_batches):
-            offset = batch_idx * BATCH_SIZE
-            lines.append(f"**批次 {batch_idx + 1}/{num_batches}**（第 {offset + 1}-{min(offset + BATCH_SIZE, total_pending)} 个）")
+            batch_ids = pending_ids[batch_idx * BATCH_SIZE : (batch_idx + 1) * BATCH_SIZE]
+            lines.append(f"**批次 {batch_idx + 1}/{num_batches}**（第 {batch_idx * BATCH_SIZE + 1}-{batch_idx * BATCH_SIZE + len(batch_ids)} 个）")
 
             try:
                 result = subprocess.run(
                     [sys.executable, "check_correlation.py", "--no-notify", "--batch-mode",
-                     "--limit", str(BATCH_SIZE)],
+                     "--alpha-ids", ",".join(batch_ids)],
                     cwd=PROJECT_DIR,
                     capture_output=True,
                     text=True,
