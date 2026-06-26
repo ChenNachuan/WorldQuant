@@ -95,6 +95,15 @@ FIELDS_DIR_DELAY0 = os.path.join(DATA_DIR, "fields_delay0")
 OPERATORS_DIR = os.path.join(DATA_DIR, "operators")
 SHARED_POOL_DIR = os.path.join(DATA_DIR, "shared_pool")
 
+# 失败模式黑名单文件路径
+FAILED_PATTERNS_FILE = os.path.join(DATA_DIR, "failed_patterns.json")
+
+# 黑名单阈值：同一模式失败超过此次数后跳过
+FAILED_PATTERN_THRESHOLD = 5
+
+# 表达式运算符数量上限
+MAX_OPERATORS_COUNT = 64
+
 
 def clean_expression(expr: str) -> str:
     """Fix common LLM mistakes in expressions."""
@@ -156,7 +165,10 @@ class AlphaMiner:
         self.tested_expressions = set()
         self._token_expires_at = 0  # Token过期时间戳
         self._auth_retry_count = 0  # 认证重试次数
-        self._failed_patterns = {}  # 失败模式记录 {pattern: count}
+
+        # 失败模式黑名单（持久化到文件）
+        # 格式: {pattern_prefix: {"count": N, "last_seen": timestamp, "example": "..."}}
+        self._failed_patterns = self._load_failed_patterns()
 
         # Queues
         self.llm_task_queue = queue.Queue()
@@ -201,6 +213,58 @@ class AlphaMiner:
         os.makedirs(FIELDS_DIR_DELAY1, exist_ok=True)
         os.makedirs(FIELDS_DIR_DELAY0, exist_ok=True)
         os.makedirs(SHARED_POOL_DIR, exist_ok=True)
+
+    def _load_failed_patterns(self) -> Dict:
+        """
+        从文件加载失败模式黑名单。
+        黑名单用于跳过已知会失败的表达式模式，避免重复尝试。
+        """
+        if not os.path.exists(FAILED_PATTERNS_FILE):
+            return {}
+
+        try:
+            with open(FAILED_PATTERNS_FILE, "r", encoding="utf-8") as f:
+                patterns = json.load(f)
+                logger.info(f"Loaded {len(patterns)} failed patterns from blacklist")
+                return patterns
+        except Exception as e:
+            logger.warning(f"Failed to load failed patterns: {e}")
+            return {}
+
+    def _save_failed_patterns(self):
+        """
+        保存失败模式黑名单到文件。
+        持久化黑名单，重启后仍有效。
+        """
+        try:
+            with open(FAILED_PATTERNS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._failed_patterns, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save failed patterns: {e}")
+
+    def _get_pattern_fingerprint(self, expression: str) -> str:
+        """
+        获取表达式的模式指纹。
+        使用表达式的前 60 个字符作为指纹，用于匹配相似的失败模式。
+        """
+        # 去掉数字参数，简化表达式
+        import re
+        simplified = re.sub(r'\d+', 'N', expression)
+        return simplified[:60]
+
+    def is_pattern_blacklisted(self, expression: str) -> bool:
+        """
+        检查表达式是否在黑名单中。
+        如果同一模式失败超过阈值次数，返回 True 表示应该跳过。
+        """
+        fingerprint = self._get_pattern_fingerprint(expression)
+        pattern_info = self._failed_patterns.get(fingerprint)
+
+        if pattern_info and pattern_info.get("count", 0) >= FAILED_PATTERN_THRESHOLD:
+            logger.debug(f"Expression in blacklist (failed {pattern_info['count']} times): {fingerprint}...")
+            return True
+
+        return False
 
     def _load_operator_knowledge(self) -> Dict[str, int]:
         """Load operator arity from operators.csv."""
@@ -435,6 +499,21 @@ class AlphaMiner:
         else:
             weights = self.log_minmax_softmax(raw_counts, temperature=0.12)
 
+        # 低成功率模块权重调整：对连续 N 次成功率仍为 0 的模块，降低其被选中概率
+        # 保持探索性，但避免浪费资源在长期失败的模块上
+        LOW_SUCCESS_THRESHOLD = 30  # 连续尝试次数阈值
+        LOW_SUCCESS_PENALTY = 0.1   # 权重降低到原来的 10%
+
+        for i, mod in enumerate(modules):
+            if mod in self.module_stats:
+                tried = self.module_stats[mod]['tried']
+                success = self.module_stats[mod]['success']
+
+                # 如果连续尝试次数超过阈值且成功率为 0，降低权重
+                if tried >= LOW_SUCCESS_THRESHOLD and success == 0:
+                    weights[i] *= LOW_SUCCESS_PENALTY
+                    logger.debug(f"Module {mod} weight reduced (tried={tried}, success={success})")
+
         # Select 1 or 2 modules
         num_to_select = random.choice([1, 2])
         selected = random.choices(modules, weights=weights, k=num_to_select)
@@ -619,6 +698,22 @@ VECTOR 字段绝对禁止使用：
 
         return valid_results
 
+    def _count_operators(self, expression: str) -> int:
+        """
+        计算表达式中的运算符数量。
+        运算符包括：函数调用、括号、逗号等。
+        使用简单计数方法：左括号数量 + 逗号数量。
+        """
+        # 计算左括号数量（每个左括号代表一个函数调用或子表达式）
+        left_parens = expression.count('(')
+
+        # 计算逗号数量（每个逗号代表一个参数分隔）
+        commas = expression.count(',')
+
+        # 运算符数量约等于左括号数量 + 逗号数量
+        # 这是一个简化计算，但足够用于过滤过长的表达式
+        return left_parens + commas
+
     def _validate_expression_quality(self, expression: str) -> bool:
         """
         验证表达式质量，提前过滤低质量表达式。
@@ -626,6 +721,12 @@ VECTOR 字段绝对禁止使用：
         """
         # 检查表达式长度（太短可能逻辑不完整）
         if len(expression) < 20:
+            return False
+
+        # 检查运算符数量是否超过限制
+        operator_count = self._count_operators(expression)
+        if operator_count > MAX_OPERATORS_COUNT:
+            logger.warning(f"Expression with {operator_count} operators exceeds limit of {MAX_OPERATORS_COUNT}: {expression[:60]}...")
             return False
 
         # 检查是否包含基本的标准化函数
@@ -669,31 +770,40 @@ VECTOR 字段绝对禁止使用：
 
     def _record_failed_pattern(self, expression: str, failed_checks: list):
         """
-        记录失败模式，用于避免重复生成类似表达式。
+        记录失败模式到黑名单，用于避免重复生成类似表达式。
+        同一模式失败超过阈值次数后，将被跳过不再尝试。
         """
-        # 提取表达式的核心模式（去掉具体参数）
-        import re
+        import time
 
-        # 简化表达式，去掉数字参数
-        simplified = re.sub(r'\d+', 'N', expression)
+        # 使用指纹方法获取模式键
+        pattern_key = self._get_pattern_fingerprint(expression)
 
-        # 记录失败模式
-        pattern_key = simplified[:100]  # 只取前100个字符作为模式
         if pattern_key not in self._failed_patterns:
             self._failed_patterns[pattern_key] = {
                 "count": 0,
-                "checks": set(),
-                "example": expression[:80]
+                "checks": [],
+                "example": expression[:80],
+                "last_seen": time.time()
             }
 
         self._failed_patterns[pattern_key]["count"] += 1
-        self._failed_patterns[pattern_key]["checks"].update(failed_checks)
+        self._failed_patterns[pattern_key]["last_seen"] = time.time()
 
-        # 如果同一个模式失败超过3次，记录到日志
-        if self._failed_patterns[pattern_key]["count"] >= 3:
-            logger.warning(f"Repeated failure pattern detected: {pattern_key[:50]}... "
-                          f"(failed {self._failed_patterns[pattern_key]['count']} times, "
-                          f"checks: {failed_checks})")
+        # 更新失败检查类型（转换为列表以支持 JSON 序列化）
+        existing_checks = set(self._failed_patterns[pattern_key].get("checks", []))
+        existing_checks.update(failed_checks)
+        self._failed_patterns[pattern_key]["checks"] = list(existing_checks)
+
+        # 记录日志
+        count = self._failed_patterns[pattern_key]["count"]
+        if count >= FAILED_PATTERN_THRESHOLD:
+            logger.warning(f"Pattern added to blacklist (failed {count} times): {pattern_key}... "
+                          f"checks: {failed_checks}")
+            # 保存黑名单到文件
+            self._save_failed_patterns()
+        elif count >= 3:
+            logger.warning(f"Repeated failure pattern detected: {pattern_key}... "
+                          f"(failed {count} times, checks: {failed_checks})")
 
     def generate_crossover_alphas(self) -> List[Dict]:
         """Generate alphas by crossing over elite factors from shared pool using non-linear operations."""
@@ -736,12 +846,23 @@ VECTOR 字段绝对禁止使用：
         else:
             self.notifier.record_llm_error()
 
-        # Clean expressions and tag as crossover
+        # Clean expressions, validate quality, and tag as crossover
+        valid_results = []
         for res in results:
-            res['expression'] = clean_expression(res.get('expression', ''))
-            res['modules_used'] = []  # Crossover doesn't count for module stats
+            expression = res.get('expression', '')
+            if not expression:
+                continue
 
-        return results
+            # 验证表达式质量
+            if not self._validate_expression_quality(expression):
+                logger.warning(f"Skipping low quality crossover expression: {expression[:60]}...")
+                continue
+
+            res['expression'] = clean_expression(expression)
+            res['modules_used'] = []  # Crossover doesn't count for module stats
+            valid_results.append(res)
+
+        return valid_results
 
     # ==========================================
     # Simulation & Polling
@@ -1030,8 +1151,10 @@ VECTOR 字段绝对禁止使用：
                 # 记录失败模式
                 self._record_failed_pattern(expression, failed_checks)
 
-                # Try parameter sweep first
-                if self._try_parameter_sweep(alpha_id, expression, failed_checks):
+                # 如果模式已在黑名单中，跳过参数扫描（节省约12分钟）
+                if self.is_pattern_blacklisted(expression):
+                    logger.info(f"Pattern blacklisted, skipping parameter sweep for {alpha_id}")
+                elif self._try_parameter_sweep(alpha_id, expression, failed_checks):
                     logger.info(f"Alpha {alpha_id} saved via parameter sweep")
                 else:
                     # Parameter sweep failed, check if should rescue
@@ -1365,13 +1488,24 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
         else:
             self.notifier.record_llm_error()
 
-        # Clean expressions and tag as rescue
+        # Clean expressions, validate quality, and tag as rescue
+        valid_results = []
         for res in results:
-            res['expression'] = clean_expression(res.get('expression', ''))
-            res['modules_used'] = modules_used
+            expression = res.get('expression', '')
+            if not expression:
+                continue
 
-        logger.info(f"Generated {len(results)} rescue variants for alpha {alpha_id} (attempt {candidate['attempt_count'] + 1})")
-        return results
+            # 验证表达式质量
+            if not self._validate_expression_quality(expression):
+                logger.warning(f"Skipping low quality rescue expression: {expression[:60]}...")
+                continue
+
+            res['expression'] = clean_expression(expression)
+            res['modules_used'] = modules_used
+            valid_results.append(res)
+
+        logger.info(f"Generated {len(valid_results)} rescue variants for alpha {alpha_id} (attempt {candidate['attempt_count'] + 1})")
+        return valid_results
 
     def _process_rescue_task(self, task: Dict):
         """Process a rescue task - generate variants of borderline alpha."""
@@ -1432,9 +1566,17 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
             self.notifier.record_llm_error()
 
         for variant in variants:
-            if variant.get("expression"):
-                variant['modules_used'] = task.get("modules_used", [])
-                self.test_queue.put(variant)
+            expression = variant.get("expression", "")
+            if not expression:
+                continue
+
+            # 验证表达式质量
+            if not self._validate_expression_quality(expression):
+                logger.warning(f"Skipping low quality rescue variant: {expression[:60]}...")
+                continue
+
+            variant['modules_used'] = task.get("modules_used", [])
+            self.test_queue.put(variant)
 
     # ==========================================
     # Main Execution Loop
@@ -1480,6 +1622,12 @@ Sharpe={sharpe:.2f} Fitness={fitness:.2f} Turnover={turnover:.2f}
                         # Skip if already tested
                         if not expression or expression in self.tested_expressions:
                             continue
+
+                        # Skip if pattern is blacklisted (failed too many times)
+                        if self.is_pattern_blacklisted(expression):
+                            logger.debug(f"Skipping blacklisted pattern: {expression[:60]}...")
+                            continue
+
                         self.tested_expressions.add(expression)
 
                         mod_str = "+".join(factor.get("modules_used", []))

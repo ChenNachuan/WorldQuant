@@ -360,6 +360,26 @@ def cmd_list(args: list) -> tuple:
     return "因子列表", "\n".join(lines)
 
 
+def cmd_help(args: list) -> tuple:
+    """执行 /help 命令。返回 (title, content)。"""
+    lines = [
+        "## 可用命令",
+        "",
+        "| 命令 | 说明 | 示例 |",
+        "|------|------|------|",
+        "| `/summary` | 查看因子库统计 | `/summary` |",
+        "| `/start [workers]` | 启动挖掘器 | `/start 2` |",
+        "| `/stop` | 停止挖掘器 | `/stop` |",
+        "| `/check` | 运行相关性检查 | `/check` |",
+        "| `/submit <id> [id2...]` | 提交指定因子 | `/submit akornja9` |",
+        "| `/list [数量] [状态]` | 查看因子列表 | `/list 20 submitted` |",
+        "| `/help` | 显示此帮助信息 | `/help` |",
+        "",
+        "**状态筛选:** submitted, unsubmitted, pending, tested",
+    ]
+    return "帮助信息", "\n".join(lines)
+
+
 # ── 命令路由 ─────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -369,6 +389,7 @@ COMMANDS = {
     "/check": cmd_check,
     "/submit": cmd_submit,
     "/list": cmd_list,
+    "/help": cmd_help,
 }
 
 
