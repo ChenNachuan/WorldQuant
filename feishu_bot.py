@@ -295,6 +295,8 @@ def cmd_check(args: list) -> tuple:
             except Exception as e:
                 lines.append(f"  - ❌ 错误: {e}")
 
+            lines.append("")  # 批次间空行分隔
+
         # 汇总
         lines.append("")
         lines.append("### 汇总")
