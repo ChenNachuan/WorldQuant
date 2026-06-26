@@ -246,13 +246,6 @@ def cmd_check(args: list) -> tuple:
         if total_pending == 0:
             return "相关性检查", "没有 pending 的 alpha"
 
-        # 聚合统计
-        agg = {
-            "total": 0, "pass": 0, "fail": 0, "pending": 0,
-            "updated": 0, "deleted": 0, "error": 0,
-            "failed_alphas": [],
-        }
-        summary = {}
         num_batches = (total_pending + BATCH_SIZE - 1) // BATCH_SIZE
 
         lines = ["## 相关性检查结果", "", f"共 {total_pending} 个 pending，分 {num_batches} 批检查（每批 {BATCH_SIZE} 个）", ""]
@@ -271,22 +264,11 @@ def cmd_check(args: list) -> tuple:
                     timeout=BATCH_TIMEOUT,
                 )
 
-                # 解析 JSON 输出
                 output = result.stdout
                 marker = "__BATCH_RESULT__"
                 if marker in output:
                     json_str = output.split(marker, 1)[1].strip()
                     batch = _json.loads(json_str)
-                    agg["total"] += batch.get("total", 0)
-                    agg["pass"] += batch.get("pass", 0)
-                    agg["fail"] += batch.get("fail", 0)
-                    agg["pending"] += batch.get("pending", 0)
-                    agg["updated"] += batch.get("updated", 0)
-                    agg["deleted"] += batch.get("deleted", 0)
-                    agg["error"] += batch.get("error", 0)
-                    agg["failed_alphas"].extend(batch.get("failed_alphas", []))
-                    summary = batch.get("summary", summary)
-
                     lines.append(f"  - PASS: {batch.get('pass', 0)}, FAIL: {batch.get('fail', 0)}, PENDING: {batch.get('pending', 0)}")
                 else:
                     lines.append(f"  - ⚠️ 未解析到结果")
@@ -298,35 +280,16 @@ def cmd_check(args: list) -> tuple:
 
             lines.append("")  # 批次间空行分隔
 
-        # 汇总
-        lines.append("")
-        lines.append("### 汇总")
-        lines.append(f"- 总数: {agg['total']}")
-        lines.append(f"- PASS: {agg['pass']} ✅")
-        lines.append(f"- FAIL: {agg['fail']} ❌")
-        lines.append(f"- PENDING: {agg['pending']}")
-        if agg['deleted'] > 0:
-            lines.append(f"- 已删除: {agg['deleted']}")
-        if agg['error'] > 0:
-            lines.append(f"- 错误: {agg['error']}")
-        if summary:
-            lines.append("")
-            lines.append("### 因子库")
-            lines.append(f"- 总数: {summary.get('total', '?')}")
-            lines.append(f"- 已提交: {summary.get('submitted', '?')}")
-            lines.append(f"- 累计因子: {summary.get('new_all_time', '?')}")
+        # 直接查数据库获取最终统计
+        summary = db.get_alpha_summary()
+        after_pending = len([a for a in db.get_all_alphas(limit=10000) if a.get("status") == "pending"])
 
-        # 发送飞书通知
-        from core.notifier import get_notifier
-        notifier = get_notifier()
-        if notifier.enabled and (agg['pass'] > 0 or agg['fail'] > 0):
-            notifier.notify_correlation_check(
-                total=agg['total'],
-                passed=agg['pass'],
-                failed=agg['fail'],
-                failed_alphas=agg['failed_alphas'],
-                summary=summary,
-            )
+        lines.append("### 汇总")
+        lines.append(f"- 因子总数: {summary['total']}")
+        lines.append(f"- 已提交: {summary['submitted']}")
+        lines.append(f"- 待检查: {after_pending}")
+        lines.append(f"- 可提交: {summary['unsubmitted']}")
+        lines.append(f"- 累计因子: {summary['new_all_time']}")
 
         return "相关性检查", "\n".join(lines)
 
