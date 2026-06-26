@@ -198,6 +198,31 @@ def main():
             print("⏳ PENDING")
             stats["pending"] += 1
 
+        elif sc["status"] == "ERROR":
+            # SELF_CORRELATION ERROR：检查 alpha 年龄，超过 3 天的直接删除
+            created_at = alpha.get("created_at", "")
+            if created_at:
+                try:
+                    from datetime import datetime, timezone
+                    created = datetime.strptime(created_at[:19], "%Y-%m-%d %H:%M:%S")
+                    age_days = (datetime.now() - created).days
+                    if age_days >= 3:
+                        print(f"✗ ERROR (age={age_days}d, too old)")
+                        stats["fail"] += 1
+                        if not args.dry_run:
+                            db.delete_alpha_by_alpha_id(alpha_id)
+                            stats["deleted"] += 1
+                            print(f"  -> 已删除（超过 3 天仍 ERROR）")
+                    else:
+                        print(f"⏳ ERROR (age={age_days}d, will retry)")
+                        stats["error"] += 1
+                except Exception:
+                    print(f"? ERROR")
+                    stats["error"] += 1
+            else:
+                print(f"? ERROR (no created_at)")
+                stats["error"] += 1
+
         else:
             print(f"? {sc['status']}")
             stats["error"] += 1
